@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenJobAutofill</title>
+    <link rel="stylesheet" href="./popup.css" />
+    <link rel="stylesheet" href="./electric-studio.css" />
+  </head>
+  <body class="popup-page">
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOCAL AUTOFILL</p>
+          <h1>OpenJobAutofill <span id="versionLabel" class="version-label"></span></h1>
+          <p class="repo-note">资料留在本机，提交始终由你确认。</p>
+        </div>
+        <button id="openOptions" class="ghost" type="button">设置</button>
+      </header>
+
+      <section class="panel">
+        <button id="startAutofillBtn" type="button">开始填写</button>
+        <button id="showProfilePanelBtn" class="secondary" type="button">打开资料面板</button>
+        <button id="copyDebugLogBtn" class="ghost full" type="button">复制调试日志</button>
+        <button id="clearDebugLogBtn" class="ghost full" type="button">清除调试日志</button>
+        <button id="clearMarksBtn" class="ghost full" type="button">清除颜色标记</button>
+      </section>
+
+      <section class="panel muted">
+        <div id="status">点击开始填写后会在页面右下角显示进度。绿色表示已填写，橙色表示待处理。</div>
+      </section>
+
+      <section class="panel">
+        <h2>怎么用</h2>
+        <p class="hint">在设置页维护本机资料。AI 只辅助识别表单字段，不接收简历具体值；资料面板用于查看、搜索和复制待处理字段需要的内容。</p>
+      </section>
+    </main>
+
+    <script src="./popup.js"></script>
+  </body>
+</html>

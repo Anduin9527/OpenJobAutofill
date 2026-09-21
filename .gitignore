@@ -1,0 +1,14 @@
+.DS_Store
+*.log
+
+node_modules/
+dist/
+build/
+coverage/
+
+.env
+.env.*
+!.env.example
+
+# Local canonical resume profile (contains personal information)
+/local-profile/
