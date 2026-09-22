@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "1.1.27-project-dialog";
+  const SCRIPT_VERSION = "1.1.28-phoenix-footer";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
@@ -716,7 +716,7 @@
     if (/体重/.test(key)) return "weight";
     if (/招聘信息来源|简历来源|信息来源/.test(key)) return "profileSource";
     if (/面试站点|面试地点|面试城市|可面试城市/.test(key)) return "interviewSite";
-    if (/姓名|出生日期|手机号码|手机号|邮箱|证件号码|身份证号|国籍|籍贯|政治面貌|民族|现居住地|现居住城市/.test(key)) {
+    if (/姓名|出生日期|手机号码|手机号|邮箱|证件号码|身份证号|国籍|籍贯|政治面貌|民族|户口所在地|户籍所在地|户籍地址|现居住地|现居住城市/.test(key)) {
       return "basic";
     }
     return "";
@@ -5956,7 +5956,7 @@
         sibling.valuePath?.sectionKey === entry.valuePath?.sectionKey &&
         sibling.valuePath?.itemIndex === entry.valuePath?.itemIndex
       );
-      if (detail?.value && !rawValue.includes(String(detail.value))) {
+      if (!["combobox", "select"].includes(field.type) && detail?.value && !rawValue.includes(String(detail.value))) {
         return `${rawValue}，${String(detail.value).trim()}`;
       }
     }
@@ -8451,13 +8451,29 @@
     return layers.length === 1 ? layers[0] : null;
   }
 
+  function getPhoenixFooterButton(popup, text) {
+    const wrapper = Array.from(popup.querySelectorAll(".selector-footer-button .button-container"))
+      .find((node) => getElementText(node).trim() === text);
+    if (!wrapper) return null;
+    // Clicking a wrapper does not dispatch a click to its child button.
+    const button = wrapper.querySelector?.("button,[role='button'],.phoenix-button");
+    if (button) return button;
+    const leaves = Array.from(wrapper.querySelectorAll?.("*") || [])
+      .filter((node) => getElementText(node).trim() === text);
+    return leaves[leaves.length - 1] || wrapper;
+  }
+
+  function closePhoenixSelector(popup) {
+    const cancel = getPhoenixFooterButton(popup, "取消");
+    if (cancel) cancel.click();
+    else document.body?.click();
+  }
+
   async function tryFillPhoenixSelector(element, value, popup) {
     const parts = splitHierarchicalChoiceValue(value);
     const route = parts.length ? parts : [value];
     const fail = (reason) => {
-      const cancel = Array.from(popup.querySelectorAll(".selector-footer-button .button-container"))
-        .find((button) => getElementText(button).trim() === "取消");
-      if (cancel) clickActionElement(cancel);
+      closePhoenixSelector(popup);
       return { ok: false, reason };
     };
     for (let index = 0; index < route.length; index += 1) {
@@ -8472,18 +8488,17 @@
       if (matches.length !== 1) return fail("Phoenix 未找到唯一地区/常量选项，未提交部分选择");
       const row = matches[0];
       if (index < route.length - 1) {
-        clickActionElement(row.querySelector(".item-text-label"));
+        row.querySelector(".item-text-label").click();
       } else {
         const icon = row.querySelector(".icon-container");
         if (!icon) return fail("Phoenix 选项缺少选择图标");
-        if (!icon.querySelector(".RadioChecked")) clickActionElement(icon);
+        if (!icon.querySelector(".RadioChecked")) icon.click();
       }
       await sleep(180);
     }
-    const confirm = Array.from(popup.querySelectorAll(".selector-footer-button .button-container"))
-      .find((button) => getElementText(button).trim() === "确定");
+    const confirm = getPhoenixFooterButton(popup, "确定");
     if (!confirm) return fail("Phoenix 缺少弹层确认按钮");
-    clickActionElement(confirm);
+    confirm.click();
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await sleep(100);
       const actual = getControlCurrentValue(element);
@@ -8501,6 +8516,10 @@
     }
 
     const controlAdapter = getFieldControlAdapter(element);
+    if (controlAdapter?.id === "phoenix-autocomplete") {
+      const previous = getVisiblePhoenixSelector();
+      if (previous) { closePhoenixSelector(previous); await sleep(120); }
+    }
     container.scrollIntoView({ block: "center", inline: "nearest" });
     clickActionElement(element instanceof Element ? element : container);
     // Phoenix's trigger is the managed input itself. Clicking the outer
@@ -8512,18 +8531,23 @@
     await sleep(220);
 
     if (controlAdapter?.id === "phoenix-autocomplete") {
-      const popup = getVisiblePhoenixSelector();
+      let popup = null;
+      for (let attempt = 0; attempt < 10 && !popup; attempt += 1) {
+        popup = getVisiblePhoenixSelector();
+        if (!popup) await sleep(100);
+      }
       if (popup?.querySelector(".selector-footer-button")) return tryFillPhoenixSelector(element, value, popup);
       if (popup) {
         const target = normalizeChoiceValue(value, inferFieldLabel(field));
         const options = Array.from(popup.querySelectorAll(".phoenix-selectList__listItem"))
           .filter((option) => isVisible(option) && choiceTextMatches(getElementText(option), target));
-        if (options.length !== 1) return { ok: false, reason: "Phoenix 普通下拉未找到唯一选项" };
-        clickActionElement(options[0]);
+        if (options.length !== 1) { closePhoenixSelector(popup); return { ok: false, reason: "Phoenix 普通下拉未找到唯一选项" }; }
+        options[0].click();
         for (let attempt = 0; attempt < 8; attempt += 1) {
           await sleep(100);
           if (choiceTextMatches(getControlCurrentValue(element), target)) return { ok: true };
         }
+        closePhoenixSelector(popup);
         return { ok: false, reason: "Phoenix 普通下拉点击后未回填" };
       }
       return { ok: false, reason: "Phoenix 未找到唯一活动弹层" };

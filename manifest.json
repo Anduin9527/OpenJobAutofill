@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OpenJobAutofill",
-  "version": "1.1.27",
+  "version": "1.1.28",
   "description": "Local resume profile helper with privacy-first AI page analysis and one-click form filling.",
   "homepage_url": "https://github.com/Anduin9527/OpenJobAutofill",
   "permissions": [

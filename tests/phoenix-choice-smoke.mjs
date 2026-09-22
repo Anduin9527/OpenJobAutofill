@@ -63,3 +63,18 @@ assert.equal((await context.fillChoice(trigger, '示例选项', {})).ok, false);
 context.document.querySelectorAll = () => [];
 assert.equal((await context.fillChoice(trigger, '示例选项', {})).ok, false);
 console.log('Phoenix plain dropdown routing and committed-value verification passed');
+// Real footer markup binds clicks to descendants; the layout wrapper is inert.
+reset();
+const nestedPopup = {
+  querySelectorAll(selector) {
+    const nodes = popup.querySelectorAll(selector);
+    if (!selector.includes('button-container')) return nodes;
+    return nodes.map(button => ({innerText:button.innerText, click(){throw new Error('inert wrapper clicked');}, querySelector:()=>button}));
+  }
+};
+assert.equal((await context.fill({}, '示例省测试市', nestedPopup)).ok, true);
+assert.deepEqual(actions, ['navigate','select','confirm']);
+reset(); missing = true;
+assert.equal((await context.fill({}, '示例省测试市', nestedPopup)).ok, false);
+assert.deepEqual(actions, ['navigate','cancel']);
+console.log('Nested footer confirm/cancel target regression passed');
