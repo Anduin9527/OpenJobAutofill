@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 const source = fs.readFileSync(new URL('../src/content.js', import.meta.url), 'utf8');
 const code = source.slice(source.indexOf('  function getVisiblePhoenixSelector()'), source.indexOf('  async function tryFillCustomChoiceField('));
-let actual, selected, level, actions, reject, missing;
+let actual, selected, level, actions, reject, missing, refuseSelection;
 const node = (innerText, click = () => {}) => ({innerText, click});
 const popup = {
   querySelectorAll(selector) {
@@ -12,11 +12,15 @@ const popup = {
     const label = level === 0 ? '示例省' : '测试市';
     return [{querySelector(s) {
       if (s === '.item-text-label,.area-text-label') return node(label, () => {actions.push('navigate'); level++;});
-      if (s === '.icon-container') return {querySelector: () => null, click() {actions.push('select'); selected = label;}};
+      if (s === '.RadioChecked,.area-icon-RadioChecked') return selected === label ? {} : null;
+      if (s === '.icon-container') return {querySelector: selector => selector === 'svg' ? {
+        dispatchEvent(event) {if (event.type === 'click') {actions.push('select'); if (!refuseSelection) selected = label;}}
+      } : selected === label ? {} : null, click() {throw new Error('inert icon wrapper clicked');}};
     }}];
   }
 };
 const context = vm.createContext({
+  window: {}, MouseEvent: class {constructor(type) {this.type=type;}},
   document: {querySelectorAll: () => []}, isVisible: () => true,
   choiceTextMatches: (a,b) => a === b,
   getElementText: n => n?.innerText || '',
@@ -24,7 +28,7 @@ const context = vm.createContext({
   clickActionElement: n => n?.click(), sleep: async () => {}, getControlCurrentValue: () => actual
 });
 vm.runInContext(code + ';this.fill = tryFillPhoenixSelector;', context);
-function reset() {actual = ''; selected = ''; level = 0; actions = []; reject = false; missing = false;}
+function reset() {actual = ''; selected = ''; level = 0; actions = []; reject = false; missing = false; refuseSelection = false;}
 reset();
 assert.equal((await context.fill({}, '示例省测试市', popup)).ok, true);
 assert.deepEqual(actions, ['navigate', 'select', 'confirm']);
@@ -93,10 +97,11 @@ const areaPopup = {
     return popup.querySelectorAll(selector).map(row => ({querySelector(selector) {
       if (selector === '.icon-container') {
         const icon = row.querySelector(selector);
-        icon.querySelector = selector => {assert.ok(selector.includes('.area-icon-RadioChecked'));return null;};
+        const query = icon.querySelector;
+        icon.querySelector = selector => {assert.ok(selector === 'svg' || selector.includes('.area-icon-RadioChecked'));return query(selector);};
         return icon;
       }
-      assert.ok(selector.includes('.area-text-label'));
+      assert.ok(selector.includes('.area-text-label') || selector.includes('.area-icon-RadioChecked'));
       return row.querySelector(selector);
     }}));
   }
@@ -109,3 +114,10 @@ reset(); missing=true;
 assert.equal((await context.fillChoice(trigger,'示例省测试市',{})).ok,false);
 assert.ok(!actions.includes('confirm'));
 console.log('Area-specific portal, route, footer, and incomplete-route regression passed');
+
+reset(); refuseSelection = true;
+const refused = await context.fill({}, '示例省测试市', nestedPopup);
+assert.equal(refused.ok, false);
+assert.match(refused.reason, /未进入选中状态/);
+assert.deepEqual(actions, ['navigate','select','cancel']);
+console.log('SVG event target and selection-before-confirm regression passed');

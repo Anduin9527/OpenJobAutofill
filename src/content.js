@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "1.1.29-phoenix-area";
+  const SCRIPT_VERSION = "1.1.30-phoenix-selection";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
@@ -8493,7 +8493,25 @@
       } else {
         const icon = row.querySelector(".icon-container");
         if (!icon) return fail("Phoenix 选项缺少选择图标");
-        if (!icon.querySelector(".RadioChecked,.area-icon-RadioChecked")) icon.click();
+        if (!icon.querySelector(".RadioChecked,.area-icon-RadioChecked")) {
+          // Phoenix binds the radio action inside the icon wrapper. A click on
+          // the wrapper never reaches an SVG descendant (events only bubble up).
+          const target = icon.querySelector("svg") || icon;
+          for (const type of ["mousedown", "mouseup", "click"]) {
+            target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+          }
+        }
+        let checked = false;
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          // React can replace the row after selection; query the live popup.
+          const current = Array.from(popup.querySelectorAll(".left-container .list-item-container,.left-container .area-item-container"))
+            .filter((item) => isVisible(item) && choiceTextMatches(
+              getElementText(item.querySelector(".item-text-label,.area-text-label")), route[index]));
+          checked = current.length === 1 && Boolean(current[0].querySelector(".RadioChecked,.area-icon-RadioChecked"));
+          if (checked) break;
+          await sleep(100);
+        }
+        if (!checked) return fail("Phoenix 点击图标后未进入选中状态，未执行确认");
       }
       await sleep(180);
     }
