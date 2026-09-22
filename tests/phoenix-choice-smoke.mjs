@@ -11,7 +11,7 @@ const popup = {
     if (missing && level === 1) return [];
     const label = level === 0 ? '示例省' : '测试市';
     return [{querySelector(s) {
-      if (s === '.item-text-label') return node(label, () => {actions.push('navigate'); level++;});
+      if (s === '.item-text-label,.area-text-label') return node(label, () => {actions.push('navigate'); level++;});
       if (s === '.icon-container') return {querySelector: () => null, click() {actions.push('select'); selected = label;}};
     }}];
   }
@@ -69,7 +69,7 @@ const nestedPopup = {
   querySelectorAll(selector) {
     const nodes = popup.querySelectorAll(selector);
     if (!selector.includes('button-container')) return nodes;
-    return nodes.map(button => ({innerText:button.innerText, click(){throw new Error('inert wrapper clicked');}, querySelector:()=>button}));
+    return nodes.map(button => ({innerText:button.innerText, click(){throw new Error('inert wrapper clicked');}, querySelector: selector => selector === '.phoenix-button__content' ? button : {click(){throw new Error('inert outer button clicked');}}}));
   }
 };
 assert.equal((await context.fill({}, '示例省测试市', nestedPopup)).ok, true);
@@ -78,3 +78,34 @@ reset(); missing = true;
 assert.equal((await context.fill({}, '示例省测试市', nestedPopup)).ok, false);
 assert.deepEqual(actions, ['navigate','cancel']);
 console.log('Nested footer confirm/cancel target regression passed');
+
+// Area selectors use their own portal, rows, labels, footer, and checked icon.
+reset();
+const areaPopup = {
+  getBoundingClientRect: () => ({right:600,bottom:500}),
+  querySelector: selector => selector.includes('.area-selector-container') ? {} : null,
+  querySelectorAll(selector) {
+    if (selector.includes('button-container')) {
+      assert.ok(selector.includes('.area-footer-button .button-container'));
+      return nestedPopup.querySelectorAll(selector);
+    }
+    assert.ok(selector.includes('.left-container .area-item-container'));
+    return popup.querySelectorAll(selector).map(row => ({querySelector(selector) {
+      if (selector === '.icon-container') {
+        const icon = row.querySelector(selector);
+        icon.querySelector = selector => {assert.ok(selector.includes('.area-icon-RadioChecked'));return null;};
+        return icon;
+      }
+      assert.ok(selector.includes('.area-text-label'));
+      return row.querySelector(selector);
+    }}));
+  }
+};
+context.document.querySelectorAll = () => [hidden,areaPopup];
+assert.equal(vm.runInContext('getVisiblePhoenixSelector()', context), areaPopup);
+assert.equal((await context.fillChoice(trigger,'示例省测试市',{})).ok,true);
+assert.deepEqual(actions,['cancel','navigate','select','confirm']);
+reset(); missing=true;
+assert.equal((await context.fillChoice(trigger,'示例省测试市',{})).ok,false);
+assert.ok(!actions.includes('confirm'));
+console.log('Area-specific portal, route, footer, and incomplete-route regression passed');

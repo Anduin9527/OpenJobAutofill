@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "1.1.28-phoenix-footer";
+  const SCRIPT_VERSION = "1.1.29-phoenix-area";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
@@ -8446,17 +8446,18 @@
       .filter((layer) => {
         const rect = layer.getBoundingClientRect();
         return isVisible(layer) && rect.right > 0 && rect.bottom > 0 &&
-          layer.querySelector(".selector-footer-button,.phoenix-selectList");
+          layer.querySelector(".selector-footer-button,.area-selector-container,.phoenix-selectList");
       });
     return layers.length === 1 ? layers[0] : null;
   }
 
   function getPhoenixFooterButton(popup, text) {
-    const wrapper = Array.from(popup.querySelectorAll(".selector-footer-button .button-container"))
+    const wrapper = Array.from(popup.querySelectorAll(".selector-footer-button .button-container,.area-footer-button .button-container"))
       .find((node) => getElementText(node).trim() === text);
     if (!wrapper) return null;
     // Clicking a wrapper does not dispatch a click to its child button.
-    const button = wrapper.querySelector?.("button,[role='button'],.phoenix-button");
+    const button = wrapper.querySelector?.(".phoenix-button__content") ||
+      wrapper.querySelector?.("button,[role='button'],.phoenix-button__wraper");
     if (button) return button;
     const leaves = Array.from(wrapper.querySelectorAll?.("*") || [])
       .filter((node) => getElementText(node).trim() === text);
@@ -8479,20 +8480,20 @@
     for (let index = 0; index < route.length; index += 1) {
       let matches = [];
       for (let attempt = 0; attempt < 8; attempt += 1) {
-        matches = Array.from(popup.querySelectorAll(".left-container .list-item-container"))
+        matches = Array.from(popup.querySelectorAll(".left-container .list-item-container,.left-container .area-item-container"))
           .filter((row) => isVisible(row) && choiceTextMatches(
-            getElementText(row.querySelector(".item-text-label")), route[index]));
+            getElementText(row.querySelector(".item-text-label,.area-text-label")), route[index]));
         if (matches.length === 1) break;
         await sleep(100);
       }
       if (matches.length !== 1) return fail("Phoenix 未找到唯一地区/常量选项，未提交部分选择");
       const row = matches[0];
       if (index < route.length - 1) {
-        row.querySelector(".item-text-label").click();
+        row.querySelector(".item-text-label,.area-text-label").click();
       } else {
         const icon = row.querySelector(".icon-container");
         if (!icon) return fail("Phoenix 选项缺少选择图标");
-        if (!icon.querySelector(".RadioChecked")) icon.click();
+        if (!icon.querySelector(".RadioChecked,.area-icon-RadioChecked")) icon.click();
       }
       await sleep(180);
     }
@@ -8536,7 +8537,7 @@
         popup = getVisiblePhoenixSelector();
         if (!popup) await sleep(100);
       }
-      if (popup?.querySelector(".selector-footer-button")) return tryFillPhoenixSelector(element, value, popup);
+      if (popup?.querySelector(".selector-footer-button,.area-selector-container")) return tryFillPhoenixSelector(element, value, popup);
       if (popup) {
         const target = normalizeChoiceValue(value, inferFieldLabel(field));
         const options = Array.from(popup.querySelectorAll(".phoenix-selectList__listItem"))
