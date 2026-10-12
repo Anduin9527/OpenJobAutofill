@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "1.2.10-zhiye-fields";
+  const SCRIPT_VERSION = "1.2.11-geely-moka";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
@@ -141,7 +141,7 @@
     {
       id: "moka",
       name: "Moka / 钉钉招聘",
-      urlPattern: /(?:^|\.)(?:mokahr|moka|dingtalkoxm)\.com$/i,
+      urlPattern: /(?:^|\.)(?:mokahr|moka|dingtalkoxm)\.com$|^campus\.geely\.com$/i,
       confidence: 0.95,
       indicators: ["[class*='apply-field-']", "[class*='apply-block-']", "[class*='blockTitle-']", ".ant-form-item"],
       containerSelector: "[class*='apply-field-'],.ant-form-item,[class*='form-item'],[class*='field-wrapper'],[class*='question-item'],[class*='schema-form-item']",
@@ -356,6 +356,38 @@
         Boolean(element.matches?.(".phoenix-input__input,.phoenix-textarea__realTextarea") && element.closest(".form-item--phoenix")),
       getFieldContainer: (element) => element.closest(".form-item--phoenix"),
       getLabel: (element) => getElementText(element.closest(".form-item--phoenix")?.querySelector(".form-item__title .form-item__text")),
+      fill: (element, value, field, candidate) => writeTextAndVerify(element,
+        candidate?.writeMode === "date" ? normalizeDateValue(value) : value)
+    },
+    {
+      id: "moka-sd-date", name: "Moka SD 日历",
+      matches: (element) => Boolean(element.matches?.("input") &&
+        element.closest("[class*='apply-field-'][class*='day_info-']")),
+      getFieldContainer: (element) => element.closest("[class*='apply-field-']"),
+      getLabel: (element) => getElementText(element.closest("[class*='apply-field-']")?.querySelector(":scope > [class*='title-']")),
+      getCurrentValue: (element) => normalizeDateValue(element.value || ""),
+      fill: fillMokaDayDate
+    },
+    {
+      id: "moka-sd-location", name: "Moka SD 地区",
+      matches: (element) => Boolean(element.closest?.("[class*='apply-field-'][class*='location_info-']") && getMokaSdDropdownRoot(element)),
+      getLogicalElement: getMokaSdDropdownRoot,
+      getFieldContainer: (element) => element.closest("[class*='apply-field-']"),
+      getChoiceContainer: getMokaSdDropdownRoot,
+      getSurfaceElement: (element) => getMokaSdDropdownRoot(element)?.querySelector("label") || element,
+      getOpenTarget: (element) => getMokaSdDropdownRoot(element)?.querySelector("input") || element,
+      getLabel: (element) => getElementText(element.closest("[class*='apply-field-']")?.querySelector(":scope > [class*='title-']")),
+      getCurrentValue: (element) => getElementText(getMokaSdDropdownRoot(element)?.querySelector("label")),
+      getOptionClickTarget: (option) => option.querySelector?.("[class*='sd-Menu-content-item-']") || option,
+      optionSelectors: ["[class*='sd-Cascader-menu-'] [class*='sd-Menu-container-']"],
+      fill: fillAdapterChoice
+    },
+    {
+      id: "moka-text", name: "Moka 文本",
+      matches: (element) => Boolean(element.matches?.("input:not([type='checkbox']):not([type='radio']):not([type='file']),textarea") &&
+        element.closest("[class*='apply-field-']") && !getMokaSdDropdownRoot(element)),
+      getFieldContainer: (element) => element.closest("[class*='apply-field-']"),
+      getLabel: (element) => getElementText(element.closest("[class*='apply-field-']")?.querySelector(":scope > [class*='title-']")),
       fill: (element, value, field, candidate) => writeTextAndVerify(element,
         candidate?.writeMode === "date" ? normalizeDateValue(value) : value)
     },
@@ -2819,6 +2851,9 @@
     if (/^获奖时间$/.test(text) && total === 2) {
       return ["奖惩时间年", "奖惩时间月"][index] || "";
     }
+    if (/^(开始时间|结束时间|毕业时间)$/.test(text) && total === 2) {
+      return `${text}${["年", "月"][index] || ""}`;
+    }
     if (!/^(起止时间|就读时间)$/.test(text)) {
       return "";
     }
@@ -3103,6 +3138,7 @@
       ["教育经历", /教育背景|教育经历/],
       ["实习经历", /实习经历/],
       ["工作经历", /工作经历/],
+      ["证书技能", /技能证书|证书技能|证书信息/],
       ["项目经历", /项目经验|项目经历/],
       ["语言能力", /语言能力/],
       ["自我描述", /自我描述|自我评价/],
@@ -5085,6 +5121,10 @@
 
   function inferMatchSection(field) {
     if (field?.siteAdapterId === "citicbank" && field.section) return field.section;
+    if (field?.siteAdapterId === "moka" && field.section && field.section !== "基本信息") {
+      const section = normalizeSectionHeadingText(field.section) || field.section;
+      return section === "语言能力" ? "外语能力" : section;
+    }
     if (field?.siteAdapterId === "zhiye" && ["教育经历", "实习经历", "工作经历", "项目经历", "外语能力", "语言能力"].includes(field.section)) {
       return field.section === "语言能力" ? "外语能力" : field.section;
     }
@@ -6308,6 +6348,7 @@
     if (field.githubTarget === "platform") return "GitHub";
     if (field.siteAdapterId === "feishu-jobs" && fieldLabel === "奖惩时间年") return rawValue.match(/\b\d{4}\b/)?.[0] || "";
     if (field?.siteAdapterId === "moka") {
+      if (normalizeMatchKey(fieldLabel) === "是否全日制") return getMokaFullTimeValue(entry);
       const dateComponent = getMokaDateComponent(rawValue, fieldLabel);
       if (dateComponent) {
         return dateComponent;
@@ -6328,7 +6369,7 @@
 
   function getMokaDateComponent(value, fieldLabel) {
     const label = String(fieldLabel || "").replace(/\s+/g, "");
-    if (!/(开始|结束|奖惩|获奖)时间(年|月)$/.test(label)) {
+    if (!/(开始|结束|奖惩|获奖|毕业)时间(年|月)$/.test(label)) {
       return "";
     }
     const match = String(value || "").match(/(\d{4})(?:\s*年|[./-])\s*(\d{1,2})/);
@@ -6693,7 +6734,9 @@
       "最高学历毕业院校": /^(学校|学校名称|毕业院校|院校名称)$/,
       "最高学历专业": /^(专业|专业名称)$/,
       "最高在读学历": /^(学历|学历层次)$/,
-      "最高学历培养方式": /^(培养方式|学习形式|学历形式|学习方式|教育类型)$/
+      "最高学历培养方式": /^(培养方式|学习形式|学历形式|学习方式|教育类型)$/,
+      "毕业时间年": /^结束时间$/,
+      "毕业时间月": /^结束时间$/
     };
     if (summary[key]) {
       if (entry.category !== "教育经历" || !summary[key].test(source)) return -1000;
@@ -6703,6 +6746,26 @@
       if (!best || entry.valuePath?.sectionKey !== best.valuePath?.sectionKey || entry.valuePath?.itemIndex !== best.valuePath?.itemIndex) return -1000;
       return 115;
     }
+    const category = inferMatchSection(field);
+    if (category === "校园经历" && entry.category !== category) return -1000;
+    if (key === "是否全日制") {
+      if (entry.category !== "教育经历" || !/^(是否全日制|学习形式|学历形式|学习方式|培养方式|教育类型)$/.test(source) ||
+          !getMokaFullTimeValue(entry)) return -1000;
+      return isRepeatOccurrenceCompatible(field, entry, "教育经历") ? 115 : -1000;
+    }
+    const scopedContracts = [
+      [/^国家地区$/, /^(国籍|国籍国家或地区|国家地区|国家或地区)$/, ["基本信息"]],
+      [/^学历类型$/, /^(培养方式|教育类型|学历类型)$/, ["教育经历"]],
+      [/^奖项级别$/, /^(奖励等级|奖励级别|奖项级别|奖项等级|获奖等级)$/, ["奖惩情况"]],
+      [/^语言资格类证书$/, /^(证书名称技能名称|证书名称|语言资格类证书)$/, ["外语能力", "语言能力"]],
+      [/^掌握程度$/, /^(掌握程度|熟练程度|语言水平)$/, category === "外语能力" ? ["外语能力", "语言能力"] : [category]],
+      [/^证书名称$/, /^(证书名称技能名称|证书名称)$/, category === "证书技能" ? ["证书技能"] : [category]]
+    ];
+    for (const [target, allowed, categories] of scopedContracts) {
+      if (!target.test(key)) continue;
+      if (!allowed.test(source) || !categories.includes(entry.category)) return -1000;
+      return isRepeatOccurrenceCompatible(field, entry, category) ? 115 : -1000;
+    }
     const contracts = [
       [/^紧急联系电话$/, /^(紧急联系电话|紧急联系人电话|紧急联系人手机号)$/],
       [/^手机区号$/, /^(手机区号|电话区号|国际区号)$/],
@@ -6710,12 +6773,24 @@
       [/^证件号码$/, /^(证件号码|身份证号|身份证号码)$/],
       [/^主修课程$/, /^(主修课程|主要课程)$/],
       [/^实验室名称$/, /^(实验室名称|实验室)$/],
+      [/^证书编号$/, /^(证书编号|证书号码)$/],
       [/^语种等级考试成绩$/, /^(语种等级考试成绩|考试成绩|语言成绩|外语成绩|成绩)$/]
     ];
     for (const [target, allowed] of contracts) {
       if (target.test(key)) return allowed.test(source) ? null : -1000;
     }
     return null;
+  }
+
+  function getMokaFullTimeValue(entry) {
+    const value = normalizeMatchKey(entry?.value || "");
+    if (/非全日制/.test(value)) return "否";
+    if (/全日制/.test(value)) return "是";
+    if (normalizeMatchKey(entry?.label) === "是否全日制") {
+      if (/^(是|有|yes|true|1)$/.test(value)) return "是";
+      if (/^(否|无|no|false|0)$/.test(value)) return "否";
+    }
+    return "";
   }
 
   function getZhiyeExperiencePresenceKind(field, label) {
@@ -8397,6 +8472,74 @@
     return { handled: true, ok: false, reason: "Layui 下拉选项尚未加载或没有匹配项", adapterId: "layui" };
   }
 
+  async function fillMokaDayDate(element, value) {
+    const target = normalizeDateValue(value);
+    const controlTrace = [];
+    const result = (ok, reason = "") => ({ ok, reason, adapterId: "moka-sd-date", controlTrace });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(target)) return result(false, "日历需要完整的 YYYY-MM-DD 日期");
+    const [year, month, day] = target.split("-").map(Number);
+    const date = new Date(`${target}T00:00:00Z`);
+    if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) {
+      return result(false, "日期无效，未打开日历");
+    }
+    const live = runtime.createElementHandle(element);
+    if (normalizeDateValue(element.value) === target) return result(true);
+    const session = runtime.createChoiceSession(element, {
+      container: getMokaSdDropdownRoot(element) || element.parentElement,
+      isVisible, popupSelector: "[class*='sd-Dropdown-dropdown-'],[class*='sd-panal-menu-wrapper-']"
+    });
+    const nodes = (selector) => session.options(selector).filter(node => !/sd-basic-(fade|disabled)-/.test(String(node.className)));
+    const one = (selector) => { const found = nodes(selector); return found.length === 1 ? found[0] : null; };
+    const months = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"];
+    const cellSelector = "[class*='sd-basic-date-item-']";
+    try {
+      clickActionElement(element);
+      if (!await session.waitFor(() => one("[class*='sd-basic-selector-year-']"))) return result(false, "未打开属于当前字段的日历");
+      controlTrace.push({ phase: "opened" });
+      clickActionElement(one("[class*='sd-basic-selector-year-']"));
+      if (!await session.waitFor(() => nodes("[class*='sd-basic-year-item-']").length)) return result(false, "未打开年份面板");
+      let selected = false;
+      for (let step = 0; step < 30 && !disposed; step++) {
+        const years = nodes("[class*='sd-basic-year-item-']");
+        const match = years.filter(node => getElementText(node).replace(/年$/, "") === String(year));
+        if (match.length === 1) { clickActionElement(match[0]); selected = true; break; }
+        const range = years.map(node => Number(getElementText(node).replace(/年$/, ""))).filter(Number.isFinite);
+        if (!range.length) break;
+        const direction = year < Math.min(...range) ? "prev" : "next";
+        const nav = one(`[class*='sd-basic-selector-${direction}-tool-']`);
+        if (!nav) break;
+        const before = years.map(getElementText).join("|");
+        clickActionElement(nav.querySelector("[class*='sd-basic-selector-icon-']") || nav);
+        if (!await session.waitFor(() => nodes("[class*='sd-basic-year-item-']").map(getElementText).join("|") !== before, { timeout: 600 })) break;
+      }
+      if (!selected || disposed) return result(false, "目标年份不可选");
+      controlTrace.push({ phase: "year-selected" });
+      const monthButton = await session.waitFor(() => one("[class*='sd-basic-selector-month-']"));
+      if (!monthButton) return result(false, "未返回日期面板");
+      clickActionElement(monthButton);
+      const monthCell = await session.waitFor(() => {
+        const found = nodes(cellSelector).filter(node => [String(month), `${month}月`, months[month - 1]].includes(getElementText(node)));
+        return found.length === 1 ? found[0] : null;
+      });
+      if (!monthCell) return result(false, "目标月份不可选");
+      clickActionElement(monthCell);
+      const dayCell = await session.waitFor(() => {
+        const headingYear = getElementText(one("[class*='sd-basic-selector-year-']")).replace(/年$/, "");
+        const headingMonth = getElementText(one("[class*='sd-basic-selector-month-']"));
+        if (headingYear !== String(year) || ![String(month), `${month}月`, months[month - 1]].includes(headingMonth)) return null;
+        const found = nodes(cellSelector).filter(node => getElementText(node) === String(day));
+        return found.length === 1 ? found[0] : null;
+      });
+      if (!dayCell) return result(false, "目标日期不可选，未选择相邻月份的同名日期");
+      clickActionElement(dayCell);
+      if (!await session.waitFor(() => normalizeDateValue(live()?.value) === target)) return result(false, "日历未提交目标日期");
+      live()?.blur();
+      const ok = Boolean(await session.waitFor(() => normalizeDateValue(live()?.value) === target, { timeout: 500, stableFor: 80 }));
+      controlTrace.push({ phase: "verified" });
+      return result(ok, ok ? "" : "日期失焦后被页面回退");
+    } finally { session.close(); }
+  }
+
   async function fillPhoenixDate(element, value) {
     const root = getPhoenixDateRoot(element);
     const target = normalizeDateValue(value);
@@ -9157,12 +9300,14 @@
   async function tryFillHierarchicalChoiceOptions(value, target, element = null, session = null) {
     const parts = splitHierarchicalChoiceValue(value);
     if (parts.length < 2 || !session) return { ok: false, reason: "缺少级联路径或控件作用域" };
-    const selector = ['[role="option"]', '.ant-cascader-menu-item', '.el-cascader-node', '.arco-cascader-node', '.t-cascader__item'].join(',');
+    const adapter = getFieldControlAdapter(element);
+    const selector = ['[role="option"]', '.ant-cascader-menu-item', '.el-cascader-node', '.arco-cascader-node', '.t-cascader__item',
+      ...getControlAdapterOptionSelectors(element)].join(',');
     for (const part of parts) {
       const option = await session.waitFor(() => runtime.uniqueOption(session.options(selector), [part], choiceTextMatches, getElementText));
       if (disposed) return { ok: false, reason: "填写脚本已更新" };
       if (!option) return { ok: false, reason: "级联路径未完整匹配，需要人工确认" };
-      clickActionElement(option);
+      clickActionElement(adapter?.getOptionClickTarget?.(option) || option);
       await runtime.yieldToMain();
     }
     const verified = await session.waitFor(() => {
