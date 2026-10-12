@@ -13,6 +13,8 @@ const hooks = `
 window.fixtureApi = {fillElementSmart, buildFieldMeta, scanForm, getCurrentProfileSections,
  getAutofillRuntimeState, renderProfilePanel, setAutofillProgress, clearAutofillProgress,
  fillFocusedProfileItem, beginProfileItemEdit, getFieldControlAdapter,
+ getProjectOverwriteGroups, assignProjectOverwrite, applyAutofillPlan, buildProfileItemAliases,
+ plan: (scan, entries) => {getCurrentProfileEntries=()=>entries;return buildAutofillPlan(scan);},
  show: async () => { injectStyle(); await refreshCurrentProfile(); showProfilePanel(); activeProfileCategory='基本信息'; renderProfilePanel(); },
  dispose: window.__OJAF_AUTOFILL_DISPOSE__
 };`;
@@ -91,6 +93,65 @@ await test('资料列表缓存、进度更新和编辑取消',async()=>{await ap
 });
 await test('定点填入只改变用户聚焦的字段',async()=>{const el=input('<label>指定姓名<input id="focused"></label><label>另一个字段<input id="untouched"></label>');el.focus();const item=api.getCurrentProfileSections()[0].items.find(i=>i.label==='姓名');await api.fillFocusedProfileItem(item);eq(el.value,'演示用户');eq(fixture.querySelector('#untouched').value,'');});
 await test('180 个字段扫描缓存与主线程分片',async()=>{fixture.innerHTML=Array.from({length:30},(_,i)=>`<fieldset><legend>项目经历 ${i+1}</legend>${['项目名称','开始时间','结束时间','项目内容','本人职责','项目链接'].map((label,j)=>`<div class="form-item"><label for="scan-${i}-${j}">${label}</label><input id="scan-${i}-${j}"></div>`).join('')}</fieldset>`).join('');let heartbeat=0;const timer=setInterval(()=>heartbeat++,1);const before=runtime.stats().yields;let result;try{result=await api.scanForm();}finally{clearInterval(timer);}eq(result.fields.length,180);assert(api.getAutofillRuntimeState().performance.scan.cacheHits>0,'cache hits');assert(runtime.stats().yields>before,'yield');assert(heartbeat>0,'main-thread heartbeat');document.getElementById('metrics').textContent=JSON.stringify({scan:api.getAutofillRuntimeState().performance.scan,runtime:runtime.stats(),heartbeat},null,2);});
+const phoenixItem=(label,control)=>`<div class="form-item form-item--phoenix"><div class="form-item__title"><label class="form-item__text">${label}</label></div><div class="form-item__control">${control}</div></div>`;
+const phoenixText=(label,value='',area=false)=>phoenixItem(label,area?`<div class="phoenix-textarea"><textarea class="phoenix-textarea__realTextarea">${value}</textarea></div>`:`<div class="phoenix-input"><input class="phoenix-input__input" value="${value}" placeholder="请输入"></div>`);
+const phoenixSelect=label=>phoenixItem(label,'<div class="phoenix-auto-complete-container"><span class="phoenix-select__value"></span><input placeholder="请选择"></div>');
+const phoenixRecords=(title,name,cards)=>`<section><div id="heading-${name}">${title}</div><div class="records">${cards.map(card=>`<article><div class="record-wrap"><div class="ux-standard-form"><div id="heading-${name}" class="form twoLineFormStyleLong" name="${name}">${card}</div></div></div></article>`).join('')}</div></section>`;
+const stored=(label,value,index=0,category='实习经历')=>{const e={label,value,hasValue:true,category,subsection:`${category} ${index+1}`,itemId:`${category}-${index}-${label}`,valuePath:{sectionKey:category,itemIndex:index}};e.aliases=api.buildProfileItemAliases({category},e);return e;};
+function phoenixMenu(input,values){
+  const popup=document.createElement('div');popup.className='fixture-popover common-unmodeled-layer';popup.hidden=true;
+  const display=input.parentElement.querySelector('.phoenix-select__value');
+  popup.innerHTML=values.map(v=>`<div class="phoenix-selectList__listItem" role="option">${v}</div>`).join('');document.body.append(popup);
+  input.onclick=()=>{popup.hidden=false;};input.onkeydown=e=>{if(e.key==='Escape')popup.hidden=true;};
+  for(const row of popup.children)row.onclick=()=>{input.value=row.textContent;display.textContent=row.textContent;popup.hidden=true;};
+  return popup;
+}
+for(const label of ['证件号码','获奖名称'])await test(`Phoenix ${label}按文本写入，不受相邻下拉提示影响`,async()=>{
+  fixture.innerHTML=phoenixText(label)+phoenixSelect('相邻类型');const el=fixture.querySelector('.phoenix-input__input');
+  const f=api.buildFieldMeta(el);f.nearbyText+=' | 请选择';eq(f.controlAdapterId,'phoenix-text');
+  eq((await api.fillElementSmart(el,'虚构测试文本',f,{writeMode:'text'})).ok,true);eq(el.value,'虚构测试文本');
+});
+await test('Phoenix 自定义实习标题优先于公司字段，重复条目保持各自编号',async()=>{
+  fixture.innerHTML=phoenixRecords('教育经历','education',[phoenixText('学校名称')])+phoenixRecords('实习经历','custom-intern',[phoenixText('公司名称')+phoenixText('工作描述','',true),phoenixText('公司名称')+phoenixText('工作描述','',true)]);
+  const scan=await api.scanForm();const fields=scan.fields.filter(f=>f.label==='工作描述');eq(fields.length,2);
+  eq(fields.every(f=>f.section==='实习经历'),true);eq(fields[0].repeatItemIndex,1);eq(fields[1].repeatItemIndex,2);eq(fields[0].repeatItemTotal,2);
+});
+await test('Phoenix 实验室和部门字段缺资料时不借用学历或行业',async()=>{
+  fixture.innerHTML=phoenixRecords('教育经历','education',[phoenixText('学校名称','虚构学校')+phoenixText('实验室名称')])+phoenixRecords('实习经历','intern',[phoenixText('公司名称','虚构公司')+phoenixText('所在部门')]);
+  const scan=await api.scanForm(),plan=api.plan(scan,[stored('学校','虚构学校',0,'教育经历'),stored('学历','硕士',0,'教育经历'),stored('公司','虚构公司'),stored('行业','虚构行业')]);
+  eq(plan.candidates.some(c=>['实验室名称','所在部门'].includes(c.fieldLabel)),false);
+});
+await test('Phoenix 实习描述按公司身份纠正，缺失结束日期仍留空',async()=>{
+  const card=name=>phoenixText('公司名称',name)+phoenixText('工作职位')+phoenixText('所在部门')+phoenixText('工作描述','2026-07',true);
+  fixture.innerHTML=phoenixRecords('实习经历','intern',[card('虚构公司乙'),card('虚构公司甲')]);
+  const entries=[stored('公司','虚构公司甲'),stored('职位','岗位甲'),stored('工作内容','描述甲'),stored('开始时间','2026-07'),stored('公司','虚构公司乙',1),stored('职位','岗位乙',1),stored('工作内容','描述乙',1),stored('开始时间','2024-09',1)];
+  const scan=await api.scanForm(),plan=api.plan(scan,entries),ids=plan.candidates.filter(c=>c.shouldAutoFill&&!c.alreadyMatches).map(c=>c.id);
+  const result=await api.applyAutofillPlan(plan,ids);eq(result.failed,0);eq(fixture.querySelectorAll('textarea')[0].value,'描述乙');eq(fixture.querySelectorAll('textarea')[1].value,'描述甲');
+  eq([...fixture.querySelectorAll('.form')].every(root=>root.querySelectorAll('input')[2].value===''),true);
+});
+await test('Phoenix 禁用结束日期不拆开手动项目名称与描述的对应关系',async()=>{
+  const disabled=phoenixItem('结束时间','<div class="phoenix-date-picker"><input disabled></div>');
+  const card=()=>phoenixText('项目名称','解析旧名')+disabled+phoenixText('项目描述','旧全文',true);
+  fixture.innerHTML=phoenixRecords('项目经历','project',[card(),card()]);
+  const scan=await api.scanForm(),groups=api.getProjectOverwriteGroups(scan);eq(groups.length,2);eq(groups.every(g=>g.fields.length===3),true);
+  const entries=[stored('项目名称','项目甲',0,'项目经历'),stored('项目描述','全文甲',0,'项目经历'),stored('项目名称','项目八',7,'项目经历'),stored('项目描述','全文八',7,'项目经历')];
+  api.assignProjectOverwrite(groups[0],entries[0]);api.assignProjectOverwrite(groups[1],entries[2]);
+  const plan=api.plan(scan,entries),ids=plan.candidates.filter(c=>c.shouldAutoFill&&!c.alreadyMatches).map(c=>c.id);
+  eq((await api.applyAutofillPlan(plan,ids)).failed,0);eq(fixture.querySelectorAll('textarea')[1].value,'全文八');eq(fixture.querySelectorAll('.phoenix-input__input')[1].value,'项目八');
+});
+await test('Phoenix 有工作/实习经历从公司事实生成，并选择“有”选项',async()=>{
+  fixture.innerHTML=phoenixRecords('实习经历','intern',[phoenixSelect('是否有工作/实习经历')+phoenixText('公司名称','虚构公司')]);
+  const el=fixture.querySelector('.phoenix-auto-complete-container input'),popup=phoenixMenu(el,['有','无']);
+  const scan=await api.scanForm(),plan=api.plan(scan,[stored('公司','虚构公司'),stored('开始时间','2026-07')]);
+  const c=plan.candidates.find(c=>c.fieldLabel==='是否有工作/实习经历');eq(c.value,'是');eq(c.sourceLabel,'公司');
+  eq((await api.fillElementSmart(el,c.value,c.field,c)).ok,true);eq(el.value,'有');popup.remove();
+});
+await test('Phoenix 婚否匹配已提供的婚姻状况，并按单选正式值验证',async()=>{
+  fixture.innerHTML=phoenixItem('婚否','<div class="phoenix-radio-group"><div class="phoenix-radio"><span class="phoenix-radio__radio-text">未婚</span></div><div class="phoenix-radio"><span class="phoenix-radio__radio-text">已婚</span></div></div>');
+  for(const option of fixture.querySelectorAll('.phoenix-radio'))option.onclick=()=>{fixture.querySelectorAll('.phoenix-radio').forEach(n=>n.classList.remove('phoenix-radio--checked'));option.classList.add('phoenix-radio--checked');};
+  const scan=await api.scanForm(),plan=api.plan(scan,[stored('婚姻状况','未婚',0,'基本信息')]);eq(plan.candidates[0].value,'未婚');
+  eq((await api.fillElementSmart(fixture.querySelector('.phoenix-radio-group'),plan.candidates[0].value,scan.fields[0],plan.candidates[0])).ok,true);
+});
 fixture.innerHTML='<h2>面板交互预览</h2><label>姓名<input id="preview-name" placeholder="先点击这里，再点资料的填入"></label><p>测试资料是虚构内容，可以查看编辑、搜索和轻量动画。</p>';
 api.renderProfilePanel();document.getElementById('summary').textContent=`完成：${passed} 通过，${failed} 失败`;
 window.scrollTo(0,0);

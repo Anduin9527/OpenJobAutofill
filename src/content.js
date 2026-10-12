@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "1.2.9-feishu-fields";
+  const SCRIPT_VERSION = "1.2.10-zhiye-fields";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
@@ -351,6 +351,15 @@
       ]
     },
     {
+      id: "phoenix-text", name: "北森 Phoenix 文本",
+      matches: (element) => /(^|\.)zhiye\.com$/i.test(location.hostname) &&
+        Boolean(element.matches?.(".phoenix-input__input,.phoenix-textarea__realTextarea") && element.closest(".form-item--phoenix")),
+      getFieldContainer: (element) => element.closest(".form-item--phoenix"),
+      getLabel: (element) => getElementText(element.closest(".form-item--phoenix")?.querySelector(".form-item__title .form-item__text")),
+      fill: (element, value, field, candidate) => writeTextAndVerify(element,
+        candidate?.writeMode === "date" ? normalizeDateValue(value) : value)
+    },
+    {
       id: "moka-sd-select",
       fill: fillAdapterChoice,
       name: "Moka SD 下拉控件",
@@ -566,7 +575,7 @@
     证件类型: ["身份证件类型", "证件类别", "证件号码类型"],
     证件号码类型: ["证件类型", "身份证件类型", "证件类别"],
     证件号码: ["身份证号", "身份证号码", "证件号", "身份证", "居民身份证号码"],
-    婚姻状况: ["婚姻状态"],
+    婚姻状况: ["婚姻状态", "婚否"],
     最高全日制学历: ["最高学历", "学历", "学历层次"],
     最高学历: ["最高全日制学历", "学历", "学历层次"],
     培养方式: ["教育类型", "学习形式", "办学形式", "统招统分"],
@@ -1014,6 +1023,21 @@
 
   function getPhoenixSection(element) {
     const root = element?.closest?.(".form[name]");
+    const heading = cachedScanRead("phoenixSectionHeading", root, () => {
+      // Current custom forms render their own heading before the enclosing
+      // list of .form[name] records. Skip previous records and sections.
+      for (let node = root, depth = 0; node && depth < 8; node = node.parentElement, depth++) {
+        const previous = node.previousElementSibling;
+        if (!previous || previous.matches?.(".form[name]") || previous.querySelector?.(".form[name]")) continue;
+        const text = getElementText(previous);
+        if (text.length <= 180) {
+          const section = normalizeSectionHeadingText(text);
+          if (section) return section;
+        }
+      }
+      return "";
+    });
+    if (heading) return heading;
     const labels = Array.from(root?.querySelectorAll(".form-item__text") || []).map(getElementText);
     if (labels.includes("项目名称")) return "项目经历";
     if (labels.includes("学校名称")) return "教育经历";
@@ -2353,11 +2377,12 @@
 
   function bindHotjobRecords(fields, entries) {
     const identityLabels = {
-      教育经历: "学校名称", 实习经历: "单位名称", 项目经历: "项目名称"
+      教育经历: "学校名称", 实习经历: "单位名称", 工作经历: "公司名称", 项目经历: "项目名称"
     };
     const identityEntryLabels = {
       教育经历: new Set(["学校名称", "学校"]),
       实习经历: new Set(["单位名称", "公司名称", "公司"]),
+      工作经历: new Set(["单位名称", "公司名称", "公司", "工作单位"]),
       项目经历: new Set(["项目名称"])
     };
     const groups = new Map();
@@ -2375,7 +2400,8 @@
     for (const group of groups.values()) {
       const first = group[0];
       const identityLabel = identityLabels[first.inferredCategory];
-      const identityFields = group.filter((field) => normalizeHotjobFieldLabel(field.inferredLabel) === identityLabel);
+      const identityFields = group.filter((field) => identityEntryLabels[first.inferredCategory]
+        .has(normalizeHotjobFieldLabel(field.inferredLabel)));
       const identity = identityFields.find((field) => field.hasCurrentValue)?.currentValue || "";
       const identityLabelsForEntries = identityEntryLabels[first.inferredCategory] || new Set([identityLabel]);
       const identities = entries.filter((entry) => entry.category === first.inferredCategory &&
@@ -5059,6 +5085,9 @@
 
   function inferMatchSection(field) {
     if (field?.siteAdapterId === "citicbank" && field.section) return field.section;
+    if (field?.siteAdapterId === "zhiye" && ["教育经历", "实习经历", "工作经历", "项目经历", "外语能力", "语言能力"].includes(field.section)) {
+      return field.section === "语言能力" ? "外语能力" : field.section;
+    }
     if (field?.siteAdapterId === "feishu-jobs" && field.section) {
       const section = normalizeSectionHeadingText(field.section);
       if (section) return section;
@@ -5122,7 +5151,7 @@
     }
     if (
       /个人信息|基本信息/.test(text) ||
-      /^(姓名|性别|出生日期|民族|政治面貌|籍贯|户口所在地|现户口所在地|当前居住地|当前居住地详细地址|净身高cm|身高|体重kg|体重|血型|婚姻状况|电子邮箱|手机号码|电话)$/.test(label)
+      /^(姓名|性别|出生日期|民族|政治面貌|籍贯|户口所在地|现户口所在地|当前居住地|当前居住地详细地址|净身高cm|身高|体重kg|体重|血型|婚姻状况|婚否|电子邮箱|手机号码|电话)$/.test(label)
     ) {
       return "基本信息";
     }
@@ -5684,7 +5713,7 @@
     if (/政治面貌|政治身份/.test(key)) {
       return "politicalStatus";
     }
-    if (/婚姻状况|婚姻状态/.test(key)) {
+    if (/婚姻状况|婚姻状态|婚否/.test(key)) {
       return "maritalStatus";
     }
     if (/血型|血液类型/.test(key)) {
@@ -6088,11 +6117,9 @@
       }
     }
     if (field?.siteAdapterId === "zhiye" && fieldCategory !== "家庭信息") {
-      const explicit = normalizeMatchKey(fieldLabel || field.label || "");
-      if (fieldCategory === "教育经历" && /^(学历|学位|学历形式|学习形式|学习方式|是否挂科|班级排名|专业排名|成绩gpa|gpa|绩点|成绩)$/.test(explicit)) return getSemanticBucket(explicit, fieldCategory);
-      if (/^(姓名|学校名称|专业名称|公司名称|职位名称|职务|项目绩效|项目成果|开始时间|结束时间)$/.test(explicit)) {
-        return getSemanticBucket(explicit, fieldCategory);
-      }
+      // A concrete Phoenix title owns its meaning, including custom labels
+      // with no known bucket. Neighbouring dates are never a substitute.
+      if (!isGenericFieldLabel(fieldLabel)) return getSemanticBucket(fieldLabel, fieldCategory);
     }
     // Repeated-record labels carry their own meaning.  Moka renders a whole
     // record's sibling questions into nearbyText/groupText, so a date selector
@@ -6235,6 +6262,7 @@
     if (!rawValue) {
       return "";
     }
+    if (getZhiyeExperiencePresenceKind(field, fieldLabel)) return "是";
 
     const personalKind = getPersonalFieldKind(fieldLabel);
     if (personalKind === "englishLevel") {
@@ -6690,6 +6718,41 @@
     return null;
   }
 
+  function getZhiyeExperiencePresenceKind(field, label) {
+    if (field?.siteAdapterId !== "zhiye") return "";
+    const key = String(label || "").replace(/[\s/／]/g, "");
+    if (/^是否有项目经历$/.test(key)) return "project";
+    if (/^是否有(?:工作实习|工作|实习)经历$/.test(key)) return "employment";
+    return "";
+  }
+
+  function getZhiyeExplicitCandidateScore(field, entry, label, category) {
+    if (field?.siteAdapterId !== "zhiye") return null;
+    const source = normalizeFieldLabelText(entry?.label);
+    const key = normalizeFieldLabelText(label);
+    const presence = getZhiyeExperiencePresenceKind(field, key);
+    if (presence) {
+      const categories = presence === "project" ? ["项目经历"] : [category];
+      const identity = presence === "project" ? /^(项目名称)$/ : /^(公司|公司名称|单位名称|工作单位)$/;
+      return categories.includes(entry.category) && identity.test(source) && isRepeatOccurrenceCompatible(field, entry, category) ? 115 : -1000;
+    }
+    const contracts = [
+      [/^(工作描述|工作内容|实习内容|实习描述|工作职责)$/, /^(工作内容|工作描述|实习内容|实习描述|工作职责|职责描述)$/, ["实习经历", "工作经历"]],
+      [/^(所在部门|就职部门)$/, /^(所在部门|部门|部门名称|就职部门)$/, ["实习经历", "工作经历"]],
+      [/^实验室名称$/, /^(实验室名称|实验室)$/, ["教育经历"]],
+      [/^学院名称$/, /^(学院名称|学院|院系|学院[（(]院系[）)])$/, ["教育经历"]],
+      [/^婚否$/, /^(婚姻状况|婚姻状态|婚否)$/, ["基本信息"]],
+      [/^语言考试$/, /^(语言考试|考试名称|证书名称(?:[（(]技能名称[）)])?)$/, ["外语能力"]],
+      [/^考试分数$/, /^(考试分数|成绩|分数)$/, ["外语能力"]]
+    ];
+    const contract = contracts.find(([pattern]) => pattern.test(key));
+    if (!contract) return null;
+    const [, sourceLabels, categories] = contract;
+    if (!sourceLabels.test(source) || !categories.includes(entry.category)) return -1000;
+    if (["教育经历", "实习经历", "工作经历"].includes(category) && entry.category !== category) return -1000;
+    return isRepeatOccurrenceCompatible(field, entry, category) ? 115 : -1000;
+  }
+
   function scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory) {
     if (!field || !entry) {
       return 0;
@@ -6701,6 +6764,7 @@
     if (Object.prototype.hasOwnProperty.call(field, "manualProjectBinding")) {
       const binding = field.manualProjectBinding;
       if (!binding || entry.category !== "项目经历" || entry.valuePath?.sectionKey !== binding.sectionKey || entry.valuePath?.itemIndex !== binding.itemIndex) return -1000;
+      if (getZhiyeExperiencePresenceKind(field, fieldLabel) === "project") return entry.label === "项目名称" ? 120 : -1000;
       if (field.singleProjectDescription) return entry.label === "项目描述" ? 125 : entry.label === "项目内容" ? 120 : -1000;
       // A bound record may name the role 职责/本人职责 while the page says
       // 职责/职务, and the two land in different semantic buckets.  Inside one
@@ -6709,6 +6773,8 @@
       const bucket = getSemanticBucket(fieldLabel, "项目经历");
       return normalizeMatchKey(fieldLabel) === normalizeMatchKey(entry.label) || (bucket && bucket === getSemanticBucket(entry.label, "项目经历")) ? 120 : -1000;
     }
+    const zhiyeScore = getZhiyeExplicitCandidateScore(field, entry, fieldLabel, fieldCategory);
+    if (zhiyeScore !== null) return zhiyeScore;
     if (fieldCategory === "教育经历" && /^(学历|学位|学历形式|学习形式|学习方式|是否挂科|班级排名|专业排名|成绩gpa|gpa|绩点|成绩)$/.test(normalizeMatchKey(fieldLabel))) {
       if (entry.category !== "教育经历" || getSemanticBucket(fieldLabel, fieldCategory) !== getSemanticBucket(entry.label, entry.category)) return -1000;
     }
@@ -6795,7 +6861,7 @@
 
     const optionText = getFieldOptionLabelsText(field, 180);
     const useGroupContext = shouldUseRepeatGroupContext(field, fieldLabel, fieldCategory);
-    const fieldText = ["moka", "feishu-jobs"].includes(field.siteAdapterId) && !isGenericFieldLabel(fieldLabel)
+    const fieldText = ["moka", "feishu-jobs", "zhiye"].includes(field.siteAdapterId) && !isGenericFieldLabel(fieldLabel)
       ? compactText(fieldLabel) : compactText([
       fieldLabel,
       field.nearbyText,
@@ -7131,7 +7197,7 @@
     const fieldLabel = field?.inferredLabel || inferFieldLabel(field);
     const fieldCategory = field?.inferredCategory || inferMatchSection(field);
     const personalKind = getPersonalFieldKind(fieldLabel);
-    if (field.siteAdapterId === "moka" || field.githubTarget || Number.isInteger(field.feishuAwardIndex) || isPersonalFieldLabel(fieldLabel)) {
+    if (field.siteAdapterId === "moka" || getZhiyeExplicitCandidateScore(field, entry, fieldLabel, fieldCategory) !== null || field.githubTarget || Number.isInteger(field.feishuAwardIndex) || isPersonalFieldLabel(fieldLabel)) {
       if (scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory) < 32) return null;
     }
     if (!field.githubTarget && !isCategoryCompatibleForMapping(fieldCategory, entry.category)) {
@@ -7803,7 +7869,7 @@
     const groups = [];
     let active = null;
     for (const field of scan.fields || []) {
-      if (!field.canFill || inferMatchSection(field) !== "项目经历") { active = null; continue; }
+      if (inferMatchSection(field) !== "项目经历") { active = null; continue; }
       const label = inferFieldLabel(field);
       // Zero means no record boundary was recognized. Do not merge all such
       // fields into one record, or attach leading dates to the preceding name.
@@ -7826,7 +7892,7 @@
       }
       active.fields.push(field);
     }
-    return groups;
+    return groups.filter(group => group.fields.some(field => field.canFill));
   }
 
   function assignProjectOverwrite(group, identity) {
@@ -8763,13 +8829,16 @@
   // Equivalent spellings a dropdown may use for the value the profile holds.
   // The profile stores dates as 2026-06 while Moka renders 2026年6月, and a
   // graduation control reads a plain year where the profile has a full date.
-  function buildChoiceMatchTargets(target) {
+  function buildChoiceMatchTargets(target, fieldLabel = "") {
     const text = String(target || "").trim();
     if (!text) {
       return [];
     }
 
     const variants = [text];
+    if (/^是否有(?:项目|工作[\/／]?实习|工作|实习)经历$/.test(String(fieldLabel).replace(/\s/g, "")) && /^(是|有)$/.test(text)) {
+      variants.push("是", "有");
+    }
     // Known degree decorations are equivalent; arbitrary substring matches
     // (e.g. 英语 -> 英语四级) remain disallowed.
     const degree = text.match(/^(大学本科|本科|学士|硕士|博士)[（(](?:本科|学士|硕士|博士|研究生)[)）]$/);
@@ -8980,7 +9049,7 @@
       ...(phoenix ? { popupSelector: ".common-unmodeled-layer" } : {}) });
     // Numeric SD options are literal values; January must not become "是".
     const target = sd ? normalizeText(value, 80) : normalizeChoiceValue(value, inferFieldLabel(field));
-    const targets = buildChoiceMatchTargets(target);
+    const targets = buildChoiceMatchTargets(target, field?.inferredLabel || field?.label);
     const selector = ['[role="option"]', 'li', '.ant-select-dropdown-menu-item',
       '.phoenix-selectList__listItem', ...getControlAdapterOptionSelectors(element)].join(',');
     const readOptions = () => session.options(selector);
