@@ -41,7 +41,7 @@ async function initialize() {
 async function syncRuntimeState() {
   try {
     const response = await sendToActiveTab({ type: "OJAF_GET_RUNTIME_STATE" });
-    applyRuntimeState(response?.data || {}, options);
+    applyRuntimeState(response?.data || {});
   } catch {
     els.startAutofillBtn.disabled = false;
     els.startAutofillBtn.textContent = DEFAULT_START_LABEL;
@@ -235,18 +235,26 @@ async function sendToActiveTab(message) {
     throw new Error("No active tab found.");
   }
 
-  await executeScript(tab.id, "src/content.js");
+  const frameId = await resolveContentFrame(tab);
+  await executeScript(tab.id, "src/content.js", frameId);
+  // Do not replay a fill operation after an ambiguous response failure.
+  return sendTabMessage(tab.id, message, frameId);
+}
 
-  try {
-    return await sendTabMessage(tab.id, message);
-  } catch (firstError) {
-    try {
-      await executeScript(tab.id, "src/content.js");
-      return await sendTabMessage(tab.id, message);
-    } catch {
-      throw firstError;
-    }
-  }
+async function resolveContentFrame(tab) {
+  if (new URL(tab.url || "about:blank").hostname !== "job.citicbank.com") return 0;
+  const results = await new Promise((resolve, reject) => {
+    chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: () =>
+      location.hostname === "job.citicbank.com" &&
+      Boolean(document.querySelector("#jbxxform") && document.querySelector("#jyjlform"))
+    }, results => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message)); else resolve(results || []);
+    });
+  });
+  const candidates = results.filter(result => result.result === true);
+  if (candidates.length !== 1) throw new Error("请打开中信银行的简历编辑页，再使用填写功能。");
+  return candidates[0].frameId;
 }
 
 function sendRuntimeMessage(message) {
@@ -272,9 +280,9 @@ function queryTabs(query) {
   });
 }
 
-function executeScript(tabId, file) {
+function executeScript(tabId, file, frameId = 0) {
   return new Promise((resolve, reject) => {
-    chrome.scripting.executeScript({ target: { tabId }, files: [file] }, () => {
+    chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["src/form-runtime.js", "src/citicbank.js", file] }, () => {
       const error = chrome.runtime.lastError;
       if (error) {
         reject(new Error(error.message));
@@ -285,9 +293,9 @@ function executeScript(tabId, file) {
   });
 }
 
-function sendTabMessage(tabId, message) {
+function sendTabMessage(tabId, message, frameId = 0) {
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response) => {
+    chrome.tabs.sendMessage(tabId, message, { frameId }, (response) => {
       const error = chrome.runtime.lastError;
       if (error) {
         reject(new Error(error.message));

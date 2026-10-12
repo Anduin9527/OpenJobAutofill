@@ -1,4 +1,5 @@
 const DEFAULT_API_CONFIG = {
+  enabled: false,
   mode: "openai-compatible",
   baseUrl: "https://api.openai.com/v1",
   endpointPath: "/chat/completions",
@@ -742,7 +743,11 @@ function sanitizeAutofillDebugResults(value) {
     .map((item) => ({
       id: sanitizeDebugText(item.id || "", 120),
       ok: Boolean(item.ok),
-      note: sanitizeDebugText(item.note || "", 180)
+      note: sanitizeDebugText(item.note || "", 180),
+      controlTrace: (Array.isArray(item.controlTrace) ? item.controlTrace : [])
+        .filter(entry => isPlainObject(entry) && ["opened", "searched", "clicked", "settled", "verified", "cleanup"].includes(entry.phase))
+        .slice(0, 8).map(entry => ({ phase: entry.phase, hasValue: entry.hasValue === true,
+          matchesTarget: entry.matchesTarget === true, popupVisible: entry.popupVisible === true, focused: entry.focused === true }))
     }))
     .slice(0, 500);
 }
@@ -874,6 +879,7 @@ async function mapFields(payload) {
   }
 
   const settings = await getSettings();
+  if (settings.apiConfig.enabled !== true) throw new Error("AI 未启用，本次应使用本地规则。");
   const apiConfig = { ...settings.apiConfig, ...(payload.apiConfig || {}) };
   const profileCatalog = normalizeProvidedProfileCatalog(payload.profileCatalog);
   if (!profileCatalog) {
@@ -909,6 +915,7 @@ async function analyzePageStructure(payload) {
   }
 
   const settings = await getSettings();
+  if (settings.apiConfig.enabled !== true) throw new Error("AI 未启用，本次应使用本地规则。");
   const apiConfig = { ...settings.apiConfig, ...(payload.apiConfig || {}) };
   const compactScan = {
     url: scan.url,

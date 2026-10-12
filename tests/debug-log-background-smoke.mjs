@@ -129,6 +129,10 @@ function createRawSnapshot(index) {
         shouldAutoFill: true
       }
     ],
+    results: [{ id: 'control', ok: true, controlTrace: [
+      { phase: 'clicked', hasValue: true, matchesTarget: false, popupVisible: true, focused: true, value: 'trace-secret' },
+      { phase: 'trace-secret', value: 'trace-secret' }
+    ] }],
     summary: {
       filled: 1,
       value: `summary-value-${index}`,
@@ -166,6 +170,10 @@ assert.equal(listed.data.max, 5, "get history should expose the cap");
 assert.equal(listed.data.history.length, 5);
 assert.equal(listed.data.history[0].page.url, "https://jobs.example/apply", "URL query/hash must be omitted");
 assertNoSensitiveKeys(listed.data);
+assert.deepEqual(listed.data.history[0].results[0].controlTrace, [
+  { phase: 'clicked', hasValue: true, matchesTarget: false, popupVisible: true, focused: true }
+]);
+assert.doesNotMatch(JSON.stringify(listed.data), /trace-secret/);
 assert.doesNotMatch(JSON.stringify(listed.data), /raw-token|form-value|candidate-value|sk-test-secret|summary-value|section-secret|rendered-select-secret/);
 
 const cleanedStorage = storageState.get(DEBUG_HISTORY_KEY);

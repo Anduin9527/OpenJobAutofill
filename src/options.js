@@ -1,4 +1,5 @@
 const fields = {
+  aiEnabled: document.getElementById("aiEnabled"),
   apiMode: document.getElementById("apiMode"),
   apiKey: document.getElementById("apiKey"),
   model: document.getElementById("model"),
@@ -37,6 +38,7 @@ const PROFILE_BACKUP_FORMAT = "OpenJobAutofillProfileBackup";
 const SAVE_API_LABEL = fields.saveApiButton?.textContent || "保存 API 设置";
 const SAVE_PROFILE_LABEL = fields.saveProfileButton?.textContent || "保存资料";
 const API_CONFIG_FIELD_KEYS = [
+  "aiEnabled",
   "apiMode",
   "apiKey",
   "model",
@@ -536,6 +538,7 @@ async function loadSettings() {
 }
 
 function applyApiConfig(config) {
+  fields.aiEnabled.checked = config.enabled === true;
   fields.apiMode.value = config.mode || "openai-compatible";
   fields.apiKey.value = config.apiKey || "";
   fields.model.value = config.model || "";
@@ -559,6 +562,7 @@ function collectApiConfig() {
 
 function getApiConfigSnapshotFromFields() {
   return {
+    enabled: fields.aiEnabled.checked,
     mode: fields.apiMode.value,
     apiKey: fields.apiKey.value.trim(),
     model: fields.model.value.trim(),
@@ -647,7 +651,7 @@ async function saveApiSettings() {
     let apiPermissionGranted = true;
     let apiPermissionError = "";
     try {
-      apiPermissionGranted = await ensureApiHostPermissions(apiConfig, { prompt: true });
+      if (apiConfig.enabled) apiPermissionGranted = await ensureApiHostPermissions(apiConfig, { prompt: true });
     } catch (error) {
       apiPermissionGranted = false;
       apiPermissionError = error.message;
@@ -1079,6 +1083,7 @@ async function refreshModelList(options = {}) {
 }
 
 async function maybeAutoRefreshModelList(options = {}) {
+  if (!fields.aiEnabled.checked) return;
   const safeOptions = options && typeof options === "object" ? options : {};
   try {
     const apiConfig = collectApiConfig();

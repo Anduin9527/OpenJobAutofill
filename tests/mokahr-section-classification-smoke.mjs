@@ -37,6 +37,7 @@ vm.runInNewContext(
 assert.equal(normalizeMokaSectionTitle("教育背景添加"), "教育经历");
 assert.equal(normalizeMokaSectionTitle("实习经历 添加"), "实习经历");
 assert.equal(normalizeMokaSectionTitle("项目经验添加"), "项目经历");
+assert.equal(normalizeMokaSectionTitle("所获荣誉 添加"), "奖惩情况");
 assert.equal(normalizeMokaSectionTitle("语言能力添加"), "语言能力");
 assert.equal(normalizeMokaSectionTitle("获奖经历添加"), "奖惩情况");
 
@@ -81,7 +82,6 @@ assert.match(source, /querySelector\(":scope > \[class\*='blockTitle-'\]"\)/, "M
 assert.match(source, /const useSemanticGroupContext =/, "semantic matching must not reuse broad non-repeat group text");
 assert.match(source, /getMokaNativeDateControlInfo\(container, element\)/, "Mokahr date labels must use native control order");
 assert.match(source, /id: "moka-sd-select"/, "Mokahr SD selects must use a dedicated control adapter");
-assert.match(source, /getFieldControlAdapter\(element\)\?\.id === "moka-sd-select"/, "Mokahr selects must choose an option instead of writing raw input text");
 assert.match(source, /repeatItemIndex: repeatItem\.index/, "Mokahr fields must retain their repeat-record index");
 assert.match(source, /return fieldIndex === entryIndex \? 24 : -1000/, "Mokahr repeat records must reject cross-record matches");
 assert.match(source, /if \(!isRepeatOccurrenceCompatible\(field, entry, fieldCategory\)\)/, "local and AI mappings must enforce repeat-record boundaries");

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-const source = fs.readFileSync(new URL('../src/content.js', import.meta.url), 'utf8');
+const source = fs.readFileSync(new URL('../src/form-runtime.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../src/content.js', import.meta.url), 'utf8');
 let mode = '', year = 2026, decade = 2020, committed = '', ignoreCommit = false, yearPanelReturnMode = 'month';
 const text = (innerText, click = () => {}) => ({ innerText, click, parentElement: { className: '' } });
 const checkbox = { checked: false, click() { this.checked = !this.checked; } };

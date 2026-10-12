@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-const source = fs.readFileSync(new URL('../src/content.js', import.meta.url), 'utf8');
+const source = fs.readFileSync(new URL('../src/form-runtime.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../src/content.js', import.meta.url), 'utf8');
 const context = {
   window: {}, chrome: { runtime: { onMessage: { addListener() {} } } },
   document: { querySelector: () => null }, location: { hostname: 'example.test' },
@@ -18,7 +18,8 @@ vm.runInNewContext(source.replace(/\}\)\(\);\s*$/, `
 })();`), context);
 const { api } = context;
 assert.equal(api.normalizeMokaSectionTitle('获奖情况'), '奖惩情况');
-for (const [label, bucket] of [['奖项', 'awardName'], ['获奖级别', 'awardLevel'], ['获奖时间', 'awardDate']]) {
+assert.equal(api.normalizeMokaSectionTitle('所获荣誉添加'), '奖惩情况');
+for (const [label, bucket] of [['奖项', 'awardName'], ['所获荣誉', 'awardName'], ['获奖级别', 'awardLevel'], ['获奖时间', 'awardDate']]) {
   assert.equal(api.getSemanticBucket(label, '奖惩情况'), bucket);
 }
 const entries = [['奖惩名称', '示例竞赛奖'], ['奖惩层级', '国家级'], ['奖惩时间', '2026-06']]
@@ -35,4 +36,8 @@ for (let index = 0; index < 3; index++) {
 }
 assert.equal(api.plan(fields, entries.filter(e => e.label !== '奖惩层级')).candidates.some(c => c.fieldId === 'field-1'), false,
   'missing award level must not consume the award name or date');
+const honor = { ...fields[0], fieldId: 'honor-name', label: '所获荣誉', section: '奖惩情况', siteAdapterId: 'moka', repeatItemIndex: 1 };
+const honorCandidate = api.plan([honor], entries).candidates.find(candidate => candidate.fieldId === 'honor-name');
+assert.equal(honorCandidate?.sourceLabel, '奖惩名称');
+assert.equal(honorCandidate?.shouldAutoFill, true);
 console.log('award-aliases-smoke: ok');

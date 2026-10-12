@@ -1,9 +1,12 @@
 (() => {
-  const SCRIPT_VERSION = "1.1.30-phoenix-selection";
+  const SCRIPT_VERSION = "1.2.9-feishu-fields";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
   }
+
+  window.__OJAF_AUTOFILL_DISPOSE__?.();
+  const runtime = window.__OJAF_FORM_RUNTIME__;
 
   window.__OJAF_AUTOFILL_VERSION__ = SCRIPT_VERSION;
   window.__OJAF_AUTOFILL_LOADED__ = true;
@@ -18,6 +21,14 @@
   const PANEL_COLLAPSED_ATTR = "data-ojaf-collapsed";
   const MAX_EDIT_EXPANSIONS = 20;
   const PROFILE_PANEL_STATE_DEBOUNCE_MS = 300;
+  let scanReadCache = null;
+  let scanStats = { fields: 0, cacheHits: 0, durationMs: 0 };
+  let profileSectionsSource, profileSectionsCache = [], profileEntriesSource, profileEntriesCache = [];
+  const listRenderState = new WeakMap();
+  let searchRenderTimer = null;
+  let focusedPageControl = null;
+  let floatingDismissed = false;
+  let disposed = false;
   let fieldCounter = 0;
   let profilePanelVisible = false;
   let profilePanelCollapsed = false;
@@ -26,6 +37,7 @@
   let profilePanelStateRestored = false;
   let currentProfileV2 = null;
   let currentProfileLoadPromise = null;
+  let currentAiEnabled = false;
   let currentSiteAdapter = null;
   let sidebarFilter = "";
   let activeProfileCategory = "";
@@ -41,6 +53,7 @@
   const CONTROL_SELECTOR = [
     'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])',
     ".atsx-date-picker-period-month-label",
+    ".atsx-select",
     "textarea",
     "select",
     '[contenteditable="true"]',
@@ -66,10 +79,15 @@
     ".form-item--phoenix .phoenix-select"
   ].join(",");
 
+  const citic = window.__OJAF_CITICBANK__?.create({
+    runtime, hostname: () => location.hostname, isVisible, click: clickActionElement,
+    writeText: writeTextAndVerify, targets: buildChoiceMatchTargets, matches: choiceTextMatches
+  });
   const SITE_ADAPTERS = [
+    ...(citic ? [citic.site] : []),
     {
       id: "zhiye",
-      name: "智易/智业 ATS",
+      name: "北森 Zhiye / Phoenix",
       urlPattern: /(?:^|\.)zhiye\.com$/i,
       confidence: 0.94,
       // Keep generic form-item classes out of site detection.  Many unrelated
@@ -122,8 +140,8 @@
     },
     {
       id: "moka",
-      name: "Moka 招聘",
-      urlPattern: /(?:^|\.)(?:mokahr|moka)\.com$/i,
+      name: "Moka / 钉钉招聘",
+      urlPattern: /(?:^|\.)(?:mokahr|moka|dingtalkoxm)\.com$/i,
       confidence: 0.95,
       indicators: ["[class*='apply-field-']", "[class*='apply-block-']", "[class*='blockTitle-']", ".ant-form-item"],
       containerSelector: "[class*='apply-field-'],.ant-form-item,[class*='form-item'],[class*='field-wrapper'],[class*='question-item'],[class*='schema-form-item']",
@@ -177,10 +195,10 @@
       name: "飞书招聘",
       urlPattern: /(?:^|\.)jobs\.feishu\.cn$/i,
       confidence: 0.82,
-      indicators: [".ud-formily-item", "[class*='applyFormModuleWrapper']", "[data-form-field-id]", "[data-form-field-name]"],
-      containerSelector: ".ud-formily-item,[class*='applyFormModuleWrapper'],[class*='form-item'],[class*='field']",
-      labelSelector: ".ud-formily-item-label-content,label,[class*='label'],[data-form-field-i18n-name]",
-      sectionSelector: ".applyFormModuleWrapper-text,[class*='module-title'],[class*='section-title'],h2,h3,h4",
+      indicators: [".atsx-form-item", ".createFormSection-container", ".ud-formily-item", "[class*='applyFormModuleWrapper']", "[data-form-field-id]", "[data-form-field-name]"],
+      containerSelector: ".atsx-form-item,.ud-formily-item,[class*='applyFormModuleWrapper'],[class*='form-item'],[class*='field']",
+      labelSelector: ".atsx-form-item-label,.ud-formily-item-label-content,label,[class*='label'],[data-form-field-i18n-name]",
+      sectionSelector: ".createFormSection-left,.applyFormModuleWrapper-text,[class*='module-title'],[class*='section-title'],h2,h3,h4",
       repeatItemSelector: "[class*='applyFormModuleWrapper'],[class*='list-item'],[class*='record-item'],[class*='card-item']",
       saveLabels: ["保存", "确定", "下一步", "完成"],
       editLabels: ["编辑", "修改", "完善"]
@@ -240,8 +258,10 @@
   // describes how one field is represented and written by a UI framework.
   // This lets one Layui/Ant/Element implementation work across many hosts.
   const CONTROL_ADAPTERS = [
+    ...(citic?.adapters || []),
     {
       id: "feishu-period", name: "飞书起止月份",
+      fill: fillFeishuPeriod,
       matches: (e) => Boolean(e.matches?.(".atsx-date-picker-period-month-label")),
       getLogicalElement: (e) => e,
       getFieldContainer: (e) => e.closest(".atsx-form-item"),
@@ -249,7 +269,37 @@
       getCurrentValue: (e) => readFeishuPeriod(e)
     },
     {
+      id: "feishu-select", name: "飞书 ATSX 下拉",
+      matches: (e) => Boolean(e.closest?.(".atsx-select")?.closest(".atsx-form-item")),
+      getLogicalElement: (e) => e.closest(".atsx-select"),
+      getFieldContainer: (e) => e.closest(".atsx-form-item"),
+      getChoiceContainer: (e) => e.closest(".atsx-select"),
+      getSurfaceElement: (e) => e.closest(".atsx-select")?.querySelector("[role='combobox'],.atsx-select-selection") || e.closest(".atsx-select"),
+      getLabel: getFeishuFieldLabel,
+      getCurrentValue: (e) => {
+        const root = e.closest(".atsx-select");
+        // The editable input is a search buffer, never the selected value.
+        return Array.from(root?.querySelectorAll(".atsx-select-selection-selected-value,.atsx-select-selection-item,.atsx-select-selection__choice__content") || [])
+          .map(getElementText).filter(Boolean).join("、");
+      },
+      getOpenTarget: (e) => getControlSurfaceElement(e),
+      fill: fillAdapterChoice,
+      isDisabled: (e) => e.closest(".atsx-select")?.classList.contains("atsx-select-disabled"),
+      optionSelectors: [".atsx-select-dropdown-menu-item", ".atsx-select-item-option"]
+    },
+    {
+      id: "feishu-text", name: "飞书 ATSX 文本",
+      matches: (e) => Boolean(e.matches?.("input:not([type='checkbox']):not([type='radio']):not([type='file']),textarea") &&
+        e.closest(".atsx-form-item") && !e.closest(".atsx-select")),
+      getFieldContainer: (e) => e.closest(".atsx-form-item"),
+      getLabel: getFeishuFieldLabel,
+      // An adjacent dropdown's instruction must not route a native input to
+      // the popup driver. The DOM control determines how this field is written.
+      fill: (e, value) => writeTextAndVerify(e, value)
+    },
+    {
       id: "phoenix-date", name: "北森 Phoenix 日期",
+      fill: fillPhoenixDate,
       matches: (element) => Boolean(getPhoenixDateRoot(element)),
       getLogicalElement: (element) => getPhoenixDateInput(getPhoenixDateRoot(element)) || getPhoenixDateRoot(element),
       getFieldContainer: (element) => getPhoenixDateFieldContainer(getPhoenixDateRoot(element)),
@@ -263,6 +313,7 @@
     },
     {
       id: "phoenix-radio", name: "北森 Phoenix 单选组",
+      fill: fillPhoenixRadio,
       matches: (element) => /(^|\.)zhiye\.com$/i.test(location.hostname) && Boolean(element.closest?.(".phoenix-radio-group")),
       getLogicalElement: (element) => element.closest(".phoenix-radio-group"),
       getSurfaceElement: (element) => element.closest(".phoenix-radio-group"),
@@ -274,6 +325,7 @@
     },
     {
       id: "phoenix-autocomplete", name: "北森 Phoenix 下拉控件",
+      fill: fillAdapterChoice,
       matches: (element) => Boolean(getPhoenixAutocompleteRoot(element)),
       getLogicalElement: (element) => getPhoenixAutocompleteInput(getPhoenixAutocompleteRoot(element)) || getPhoenixAutocompleteRoot(element),
       getFieldContainer: (element) => getPhoenixAutocompleteFieldContainer(getPhoenixAutocompleteRoot(element)),
@@ -300,6 +352,7 @@
     },
     {
       id: "moka-sd-select",
+      fill: fillAdapterChoice,
       name: "Moka SD 下拉控件",
       matches(element) {
         return isMokaSdSelectField(element);
@@ -310,6 +363,26 @@
       getSurfaceElement(element) {
         const root = getMokaSdDropdownRoot(element);
         return root?.querySelector?.("label[class*='sd-Select-container-']") || element;
+      },
+      getOpenTarget(element) {
+        const root = getMokaSdDropdownRoot(element);
+        return root?.querySelector?.("label[class*='sd-Select-container-'] input") ||
+          root?.querySelector?.("label[class*='sd-Select-container-']") || element;
+      },
+      getOptionClickTarget(option) {
+        // SD's outer common-item wraps a Menu component. Click its content so
+        // the Menu selection handler participates, not just the outer wrapper.
+        return option.querySelector?.("[class*='sd-Menu-content-item-']") || option;
+      },
+      async settleSelection(element, targets) {
+        const live = runtime.createElementHandle(getMokaSdDropdownRoot(element) || element);
+        // A click may schedule a controlled update. Leaving immediately can
+        // cancel that update; wait for the display before testing real blur.
+        await runtime.waitFor(() => disposed || targets.some(target =>
+          choiceTextMatches(this.getCurrentValue(live()), target)));
+        if (disposed) return;
+        live()?.querySelector("label[class*='sd-Select-container-'] input")?.blur();
+        await runtime.yieldToMain();
       },
       getFieldContainer(element) {
         return (getMokaSdDropdownRoot(element) || element)?.closest?.("[class*='apply-field-']") || null;
@@ -325,8 +398,8 @@
         const root = getMokaSdDropdownRoot(element);
         const surface = root?.querySelector?.("label[class*='sd-Select-container-']");
         const display = surface?.querySelector?.("[class*='sd-Input-display-value-']");
-        const input = surface?.querySelector?.('input:not([type="hidden"])');
-        return normalizeText(getElementText(display) || input?.value || "", 260);
+        // The editable input holds a search query, not the committed selection.
+        return normalizeText(getElementText(display), 260);
       },
       isDisabled(element) {
         const root = getMokaSdDropdownRoot(element);
@@ -339,6 +412,8 @@
       },
       optionSelectors: [
         "[class*='sd-Select-common-item-']",
+        // Plain SD options (year/month) omit the common-item wrapper used by
+        // custom-rendered degree/school options. Both live inside one popup.
         "[class*='sd-Menu-container-']"
       ]
     },
@@ -458,6 +533,24 @@
   const PROFILE_SECTION_ALIASES = {
     项目经历: ["项目经历", "项目经验", "实践活动"]
   };
+
+  // Categories whose controls repeat once per profile record, where an explicit
+  // label must win over the surrounding record text.
+  const REPEAT_RECORD_EXPLICIT_LABELS = [
+    "教育经历",
+    "实习经历",
+    "工作经历",
+    "项目经历",
+    "奖惩情况",
+    "外语能力",
+    "语言能力"
+  ];
+
+  // Labels inside a repeated record whose meaning is fixed by their own text.
+  // Moka renders each year/month selector as its own control under one shared
+  // 起止时间 label, so the generated labels must resolve on their own.
+  const EXPLICIT_RECORD_LABEL_BUCKETS =
+    /^(开始时间|结束时间|开始日期|结束日期|起止时间|就读时间|获奖时间|奖惩时间|毕业时间|入学时间|截止时间|开始时间年|开始时间月|结束时间年|结束时间月|奖惩时间年|奖惩时间月|公司名称|公司|单位名称|职位名称|职位|职务|工作职责|工作内容|项目名称|项目描述|项目内容|项目简述|本人职责|项目职责|职责|项目链接|项目成果|学校名称|学校|专业名称|专业)$/;
 
   const PROFILE_LABEL_ALIASES = {
     姓名: ["真实姓名", "名字"],
@@ -624,7 +717,7 @@
     职务描述: ["职责", "活动描述", "工作职责或活动描述"],
     奖惩时间: ["获奖时间", "奖励时间"],
     奖惩解除时间: ["解除时间", "处分解除时间"],
-    奖惩名称: ["获奖名称", "奖励名称", "奖项名称", "荣誉名称", "奖项"],
+    奖惩名称: ["获奖名称", "奖励名称", "奖项名称", "荣誉名称", "所获荣誉", "奖项"],
     颁奖单位: ["授奖单位", "奖惩单位", "颁发单位"],
     奖惩单位: ["颁奖单位", "授奖单位", "授予单位"],
     奖励等级: ["奖项等级", "奖励级别", "奖惩层级", "获奖级别"],
@@ -762,6 +855,16 @@
       }
     }
     return Array.from(new Set(missing.map((label) => normalizeText(label, 80)).filter(Boolean)));
+  }
+
+  function cachedScanRead(key, node, read) {
+    if (!scanReadCache || !node || typeof node !== "object") return read();
+    let values = scanReadCache.get(key);
+    if (!values) { values = new WeakMap(); scanReadCache.set(key, values); }
+    if (values.has(node)) { scanStats.cacheHits += 1; return values.get(node); }
+    const value = read();
+    values.set(node, value);
+    return value;
   }
 
   function normalizeText(value, maxLength = 260) {
@@ -929,6 +1032,10 @@
   }
 
   function getFieldControlAdapter(element) {
+    return cachedScanRead("getFieldControlAdapter", element, () => readGetFieldControlAdapter(element));
+  }
+
+  function readGetFieldControlAdapter(element) {
     if (!element || !(element instanceof Element)) {
       return null;
     }
@@ -940,6 +1047,11 @@
         return false;
       }
     }) || null;
+  }
+
+  function getFeishuFieldLabel(element) {
+    const item = element.closest?.(".atsx-form-item");
+    return getElementText(item?.querySelector(".atsx-form-item-label label,.atsx-form-item-label"));
   }
 
   function getMokaSdDropdownRoot(element) {
@@ -960,15 +1072,9 @@
       return false;
     }
 
-    const fieldClass = String(field.className || "");
-    if (/date_info|(?:^|\s)Select-|select_info|bool_info/.test(fieldClass)) {
-      return true;
-    }
-
-    const heading = normalizeFieldLabelText(
-      getElementText(field.querySelector?.(":scope > [class*='title-']"))
-    );
-    return /^(学校名称|院校名称|毕业院校|专业名称|所学专业)$/.test(heading);
+    // The SD Select surface is authoritative even when the employer schema
+    // calls the field string_info (country code, school, recent major, etc.).
+    return true;
   }
 
   function getLogicalControlElement(element) {
@@ -1268,6 +1374,7 @@
   }
 
   function setAutofillProgress(stage, percent, detail = "", active = true) {
+    if (disposed) return;
     const normalizedStage = normalizeText(stage || "", 80);
     const now = Date.now();
     const previous = autofillProgress || {};
@@ -1287,17 +1394,18 @@
 
     renderFloatingStatus();
     if (profilePanelVisible) {
-      renderProfilePanel();
+      renderProfileProgress();
     }
     updateAutofillProgressTimer();
   }
 
   function clearAutofillProgress(detail = "") {
+    if (disposed) return;
     autofillInProgress = false;
     autofillProgress = { active: false, stage: "", percent: 0, detail: normalizeText(detail || "", 160) };
     renderFloatingStatus();
     if (profilePanelVisible) {
-      renderProfilePanel();
+      renderProfileProgress();
     }
     updateAutofillProgressTimer();
   }
@@ -1323,12 +1431,12 @@
   }
 
   function updateAutofillProgressTimer() {
-    if (autofillProgress.active) {
+    if (autofillProgress.active && !document.hidden && (!floatingDismissed || (profilePanelVisible && !profilePanelCollapsed))) {
       if (!autofillProgressTimer) {
         autofillProgressTimer = window.setInterval(() => {
           renderFloatingStatus();
           if (profilePanelVisible) {
-            renderProfilePanel();
+            renderProfileProgress();
           }
         }, 1000);
       }
@@ -1627,13 +1735,14 @@
   }
 
   function startAutofillRun(stage = "处理中") {
-    if (autofillInProgress) {
+    if (disposed || autofillInProgress) {
       return 0;
     }
 
     autofillInProgress = true;
     autofillRunId += 1;
     autofillSummary = null;
+    floatingDismissed = false;
     lastAutofillDebug = null;
     resetAutofillAiState();
     setAutofillProgress(stage, 4, "准备开始", true);
@@ -1651,6 +1760,7 @@
       sidebarFilter,
       activeProfileCategory,
       autofillInProgress,
+      performance: { scan: { ...scanStats }, controls: runtime?.stats() },
       autofillProgress: { ...autofillProgress },
       autofillSummary: autofillSummary ? { ...autofillSummary } : null,
       autofillAi: getAutofillAiSnapshot()
@@ -1669,6 +1779,7 @@
   async function getAutofillDebugSnapshotForExport() {
     // Export the background-owned copy only.  The background sanitizes URLs,
     // field values and broad DOM context before persisting a snapshot.
+    void queueAutofillDebugPersistence();
     await autofillDebugPersistPromise.catch(() => undefined);
     const stored = await sendRuntimeMessage({ type: "OJAF_GET_DEBUG_HISTORY" });
     const history = Array.isArray(stored?.history) ? stored.history : [];
@@ -1917,6 +2028,10 @@
   }
 
   function getTextWithoutControls(element) {
+    return cachedScanRead("getTextWithoutControls", element, () => readGetTextWithoutControls(element));
+  }
+
+  function readGetTextWithoutControls(element) {
     if (!element) {
       return "";
     }
@@ -2024,6 +2139,10 @@
   }
 
   function findFieldContainer(element) {
+    return cachedScanRead("findFieldContainer", element, () => readFindFieldContainer(element));
+  }
+
+  function readFindFieldContainer(element) {
     const controlContainer = getControlAdapterContainer(element);
     if (controlContainer) {
       return controlContainer;
@@ -2134,6 +2253,7 @@
   }
 
   function prepareFeishuRecords(fields, entries) {
+    prepareFeishuEmploymentRecords(fields, entries);
     let project = null, awardIndex = 0;
     const groups = [];
     for (let i = 0; i < fields.length; i++) {
@@ -2177,6 +2297,56 @@
         f.hotjobProfileIndex = match ? match.valuePath.itemIndex : -1;
         f.hotjobProfileSectionKey = match?.valuePath.sectionKey;
         f.feishuProjectCorrection = Boolean(match);
+      }
+    }
+  }
+
+  function prepareFeishuEmploymentRecords(fields, entries) {
+    const identityLabels = {
+      教育经历: /^(学校名称|学校|毕业院校)$/,
+      实习经历: /^(公司名称|公司|单位名称|实习单位)$/,
+      工作经历: /^(公司名称|公司|单位名称|工作单位)$/
+    };
+    const groups = [];
+    let group = null;
+    for (const field of fields) {
+      const category = field.inferredCategory;
+      if (field.siteAdapterId !== "feishu-jobs" || !identityLabels[category]) { group = null; continue; }
+      if (["实习经历", "工作经历"].includes(category) && /^(描述|实习描述|工作描述)$/.test(field.inferredLabel)) {
+        field.inferredLabel = "工作内容";
+      }
+      if (identityLabels[category].test(field.inferredLabel)) { group = []; groups.push(group); }
+      if (group?.length && group[0].inferredCategory !== category) group = null;
+      if (group) group.push(field);
+    }
+    for (const [category, identityLabel] of Object.entries(identityLabels)) {
+      const categoryGroups = groups.filter(group => group[0].inferredCategory === category);
+      const categoryFields = fields.filter(field => field.siteAdapterId === "feishu-jobs" && field.inferredCategory === category);
+      const allBlank = categoryFields.length > 0 && categoryFields.every(field => !field.hasCurrentValue && !String(field.currentValue || "").trim());
+      const identities = [...new Map(entries.filter(entry => entry.category === category && identityLabel.test(entry.label) &&
+        entry.hasValue && Number.isInteger(entry.valuePath?.itemIndex)).map(entry =>
+        [`${entry.valuePath.sectionKey}|${entry.valuePath.itemIndex}`, entry])).values()];
+      const used = new Set();
+      for (const [index, group] of categoryGroups.entries()) {
+        const name = group[0].currentValue || "";
+        const ranked = identities.map(entry => ({ entry, score: projectNameSimilarity(name, entry.value) })).sort((a, b) => b.score - a.score);
+        const best = ranked[0];
+        const positional = allBlank ? identities.filter(entry => entry.valuePath.itemIndex === index) : [];
+        let match = allBlank ? (positional.length === 1 ? positional[0] : null) :
+          best && best.score >= 0.82 && (!ranked[1] || best.score - ranked[1].score >= 0.12) ? best.entry : null;
+        const key = match && `${match.valuePath.sectionKey}|${match.valuePath.itemIndex}`;
+        if (used.has(key)) match = null;
+        if (match) used.add(key);
+        for (const field of group) {
+          field.hotjobProfileIndex = match ? match.valuePath.itemIndex : -1;
+          field.hotjobProfileSectionKey = match?.valuePath.sectionKey;
+          field.feishuRecordCorrection = Boolean(match);
+        }
+      }
+      // A missing identity is not permission to match every date/description
+      // against the profile. Leave orphaned fields for manual review.
+      if (categoryGroups.length) {
+        for (const field of categoryFields) if (!Number.isInteger(field.hotjobProfileIndex)) field.hotjobProfileIndex = -1;
       }
     }
   }
@@ -2392,6 +2562,10 @@
   }
 
   function getRepeatGroupLabelText(element) {
+    return cachedScanRead("getRepeatGroupLabelText", element, () => readGetRepeatGroupLabelText(element));
+  }
+
+  function readGetRepeatGroupLabelText(element) {
     const root = findRepeatItemRoot(element);
     if (!root) {
       return "";
@@ -2406,6 +2580,10 @@
   }
 
   function getControlContextLabel(control) {
+    return cachedScanRead("getControlContextLabel", control, () => readGetControlContextLabel(control));
+  }
+
+  function readGetControlContextLabel(control) {
     const container = findFieldContainer(control);
     return normalizeFieldLabelText(
       getControlAdapterLabel(control) ||
@@ -2471,6 +2649,8 @@
     }
 
     if (getActiveSiteAdapter()?.id === "moka") {
+      const compoundLabel = getMokaCompoundFieldLabel(label, type);
+      if (compoundLabel) return compoundLabel;
       const dateInfo = getMokaNativeDateControlInfo(container, element);
       const dateLabel = getMokaGroupedDateLabel(label, dateInfo.index, dateInfo.total);
       if (dateLabel) {
@@ -2570,6 +2750,14 @@
     return label;
   }
 
+  function getMokaCompoundFieldLabel(label, type) {
+    if (!["select", "combobox"].includes(type)) return "";
+    const key = normalizeMatchKey(label);
+    if (key === "证件号码") return "证件类型";
+    if (key === "手机号码" || key === "手机号") return "手机区号";
+    return "";
+  }
+
   function getMokaNativeDateControlInfo(container, element) {
     if (!container || !element) {
       return { index: -1, total: 0 };
@@ -2655,7 +2843,7 @@
     }
 
     if (isGenericFieldLabel(label) || isOptionOnlyLabel(label)) {
-      label = contextLabel || containerLabel || label;
+      label = containerLabel || contextLabel || label;
     }
 
     if (placeholderLabel && (isGenericFieldLabel(label) || /原因|分数|行业属性|工作内容|奖励|活动|评价|专长/.test(placeholderLabel))) {
@@ -2720,6 +2908,24 @@
   }
 
   function getSectionText(element) {
+    if (citic?.active()) return citic.section(element);
+    if (getActiveSiteAdapter()?.id === "feishu-jobs") {
+      const section = element.closest?.(".createFormSection-container,.createFormSection-container-empty");
+      if (section) {
+        const title = getElementText(section.querySelector(".createFormSection-left"));
+        if (title) return normalizeSectionHeadingText(title) || normalizeText(title, 180);
+        const cls = Array.from(section.querySelectorAll("[class*='resumeEditForm-']"))
+          .filter(node => node.closest(".createFormSection-container,.createFormSection-container-empty") === section)
+          .map(node => String(node.className || "")).join(" ");
+        if (/resumeEditForm-basicInfo/.test(cls)) return "基本信息";
+        if (/resumeEditForm-education/.test(cls)) return "教育经历";
+        if (/resumeEditForm-intern/.test(cls)) return "实习经历";
+        if (/resumeEditForm-work/.test(cls)) return "工作经历";
+        if (/resumeEditForm-project/.test(cls)) return "项目经历";
+        // Even a custom section is a boundary; never borrow the previous title.
+        return "";
+      }
+    }
     const feishuCard = element.closest?.(".resumeEditForm-item");
     if (feishuCard) {
       const cls = feishuCard.className || "";
@@ -2744,9 +2950,11 @@
     if (getActiveSiteAdapter()?.id === "moka") {
       const block = element.closest("[class*='apply-block-']");
       const heading = block?.querySelector(":scope > [class*='blockTitle-']");
-      const category = normalizeMokaSectionTitle(getElementText(heading));
-      if (category) {
-        return category;
+      const title = getElementText(heading);
+      if (title) {
+        // A custom Moka block is still a section boundary. Falling back to
+        // surrounding headings can pull the preceding project's category in.
+        return normalizeMokaSectionTitle(title) || normalizeText(title.replace(/添加\s*$/, ""), 180);
       }
     }
 
@@ -2840,6 +3048,8 @@
     const sections = [
       ["基本信息", /基本信息|个人信息/],
       ["教育经历", /教育经历|教育背景/],
+      ["实习经历", /实习经历|实习经验/],
+      ["项目经历", /项目经历|项目经验/],
       ["工作经历", /工作经历/],
       ["绩效考核", /近三年年度绩效考核|绩效考核/],
       ["家庭信息", /家庭及社会关系|家庭情况|家庭信息|社会关系/],
@@ -2870,7 +3080,7 @@
       ["项目经历", /项目经验|项目经历/],
       ["语言能力", /语言能力/],
       ["自我描述", /自我描述|自我评价/],
-      ["奖惩情况", /获奖经历|奖惩经历|奖惩情况|获奖情况/]
+      ["奖惩情况", /获奖经历|奖惩经历|奖惩情况|获奖情况|所获荣誉/]
     ];
     for (const [category, pattern] of sections) {
       if (pattern.test(text)) {
@@ -2881,6 +3091,8 @@
   }
 
   function getOptions(element) {
+    const adapter = getFieldControlAdapter(element);
+    if (adapter?.getOptions) return adapter.getOptions(element);
     if (element instanceof HTMLSelectElement) {
       return Array.from(element.options).map((option) => ({
         value: option.value,
@@ -3005,6 +3217,9 @@
     }
 
     if (adapter?.choiceContainerSelector || adapter?.getChoiceContainer) {
+      const root = getControlAdapterChoiceContainer(element) || element;
+      const display = root.querySelector?.('.ant-select-selection-item,.ant-select-selection-selected-value,.el-select__selected-item:not(.is-transparent),.arco-select-view-value,.t-select__single');
+      if (display) return normalizeText(getElementText(display), 260);
       const input = element.querySelector?.('input:not([type="hidden"]),textarea,[contenteditable="true"]');
       const directValue = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
         ? element.value
@@ -3058,17 +3273,18 @@
     })();
     const canFill = !element.disabled && !adapterDisabled && type !== "file";
     const rawLabel = normalizeText(
-      getControlAdapterLabel(element) ||
+      runtime.primaryLabel(element) ||
+        getControlAdapterLabel(element) ||
         getLabelByFor(element) ||
         getDataAttributeLabelText(element) ||
         getAdapterLabelText(element) ||
         getWrappingLabel(element) ||
         getAriaLabelText(element)
     );
-    const nearbyText = getNearbyText(element);
-    const label = improveFieldLabel(element, rawLabel, nearbyText);
+    const nearbyText = citic?.active() ? citic.label(element) : getNearbyText(element);
+    const label = citic?.active() ? citic.label(element) || rawLabel : improveFieldLabel(element, rawLabel, nearbyText);
     const currentValue = getControlCurrentValue(element);
-    const groupText = getRepeatGroupLabelText(element);
+    const groupText = citic?.active() ? citic.section(element) : getRepeatGroupLabelText(element);
     const repeatItem = getRepeatItemOccurrenceInfo(element);
 
     return {
@@ -3128,6 +3344,10 @@
   }
 
   function collectVisibleControls(root = document) {
+    return cachedScanRead("controls", root, () => collectVisibleControlsUncached(root));
+  }
+
+  function collectVisibleControlsUncached(root) {
     const candidates = [
       ...Array.from(root.querySelectorAll(CONTROL_SELECTOR)),
       // Frameworks such as Layui hide the native select and expose a proxy
@@ -3242,12 +3462,33 @@
   }
 
   async function scanForm() {
+    if (disposed) throw new Error("填写脚本已更新，请重新开始");
     currentSiteAdapter = detectSiteAdapter();
     const expandedEditCards = await expandEditableCardsForScan();
     await waitForDynamicControlRendering();
-    const controls = collectVisibleControls();
-
-    const fields = controls.map((element) => buildFieldMeta(element));
+    const started = performance.now();
+    scanStats = { fields: 0, cacheHits: 0, durationMs: 0 };
+    scanReadCache = new Map();
+    const observer = new MutationObserver(() => scanReadCache?.clear());
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    const fields = [];
+    try {
+      const controls = collectVisibleControls();
+      let sliceStarted = performance.now();
+      for (const element of controls) {
+        if (disposed) throw new Error("填写脚本已更新，请重新开始");
+        if (element.isConnected) fields.push(buildFieldMeta(element));
+        if (performance.now() - sliceStarted >= 12) {
+          await runtime.yieldToMain();
+          sliceStarted = performance.now();
+        }
+      }
+    } finally {
+      observer.disconnect();
+      scanReadCache = null;
+      scanStats.fields = fields.length;
+      scanStats.durationMs = Math.round(performance.now() - started);
+    }
     const adapter = getActiveSiteAdapter();
 
     return {
@@ -3991,6 +4232,28 @@
         color: var(--arf-accent);
       }
     `;
+    style.textContent += `
+      #${PANEL_ID}, #${FLOAT_ID} { box-sizing: border-box; }
+      #${PANEL_ID} input, #${PANEL_ID} textarea, #${PANEL_ID} button, #${FLOAT_ID} button { margin: 0; }
+      #${PANEL_ID} .arf-body { min-width: 0; overflow-x: hidden; }
+      #${PANEL_ID} .arf-content, #${PANEL_ID} .arf-row > * { min-width: 0; }
+      @keyframes ojaf-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+      #${PANEL_ID}[${PANEL_HIDDEN_ATTR}="false"], #${FLOAT_ID}:not([hidden]) { animation: ojaf-enter 180ms ease-out; }
+      #${PANEL_ID} .arf-content > * { animation: ojaf-enter 140ms ease-out; }
+      #${PANEL_ID} .arf-row-actions { flex-wrap: wrap; }
+      #${PANEL_ID} button, #${FLOAT_ID} button { transition: transform 140ms ease, background-color 140ms ease, border-color 140ms ease; }
+      #${PANEL_ID} button:active:not(:disabled), #${FLOAT_ID} button:active:not(:disabled) { transform: scale(.97); }
+      #${PANEL_ID} button:focus-visible, #${FLOAT_ID} button:focus-visible { outline: 2px solid #4361ee; outline-offset: 2px; }
+      #${PANEL_ID} .arf-progress-fill, #${FLOAT_ID} .arf-float-fill { width: 100%; transform: scaleX(0); transform-origin: left; transition: transform 220ms ease-out; }
+      #${PANEL_ID} .arf-detail-card { content-visibility: auto; contain-intrinsic-size: auto 180px; }
+      @media (max-width: 420px) {
+        #${PANEL_ID} .arf-row { grid-template-columns: minmax(64px, .34fr) minmax(0, 1fr); }
+        #${PANEL_ID} .arf-row-actions { grid-column: 2; justify-content: flex-start; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #${PANEL_ID}, #${PANEL_ID} *, #${FLOAT_ID}, #${FLOAT_ID} * { animation: none !important; transition: none !important; }
+      }
+    `;
     document.documentElement.appendChild(style);
   }
 
@@ -4047,7 +4310,9 @@
     `;
 
     floating.querySelector('[data-action="float-hide"]')?.addEventListener("click", () => {
+      floatingDismissed = true;
       floating.hidden = true;
+      updateAutofillProgressTimer();
     });
     floating.querySelector('[data-action="float-detail"]')?.addEventListener("click", () => {
       showProfilePanel();
@@ -4077,7 +4342,8 @@
   }
 
   function renderFloatingStatus() {
-    const shouldShow = Boolean(autofillProgress.active || autofillSummary);
+    if (disposed) return;
+    const shouldShow = !floatingDismissed && Boolean(autofillProgress.active || autofillSummary);
     const floating = ensureFloatingStatus();
     floating.hidden = !shouldShow;
     if (!shouldShow) {
@@ -4103,7 +4369,7 @@
         progress.hidden = false;
       }
       if (fill) {
-        fill.style.width = `${getDisplayedProgressPercent()}%`;
+        fill.style.transform = `scaleX(${getDisplayedProgressPercent() / 100})`;
       }
       if (chips) {
         chips.hidden = true;
@@ -4141,6 +4407,7 @@
   }
 
   function setProfilePanelStatus(message, isError = false) {
+    if (disposed) return;
     const panel = ensureProfilePanel();
     const statusEl = panel.querySelector('[data-role="status"]');
     if (statusEl) {
@@ -4159,6 +4426,7 @@
     } else {
       queueProfilePanelStateSave();
     }
+    updateAutofillProgressTimer();
   }
 
   function showProfilePanel() {
@@ -4169,6 +4437,7 @@
   function toggleProfilePanelCollapsed() {
     profilePanelCollapsed = !profilePanelCollapsed;
     renderAndSaveProfilePanel();
+    updateAutofillProgressTimer();
   }
 
   function ensureProfilePanel() {
@@ -4197,7 +4466,7 @@
     const subtitle = document.createElement("div");
     subtitle.className = "arf-subtitle";
     subtitle.dataset.role = "subtitle";
-    subtitle.textContent = "本机简历资料。用于查看、搜索和复制；开始填写会扫描并自动填写当前网页。";
+    subtitle.textContent = "先点击网页字段，再点资料旁的“填入”；也可复制或编辑本机资料。";
     titleWrap.append(title, subtitle);
 
     const headerActions = document.createElement("div");
@@ -4236,7 +4505,8 @@
     searchInput.addEventListener("input", () => {
       sidebarFilter = normalizeText(searchInput.value || "", 80);
       activeProfileCategory = "";
-      renderQuickCopyList(panel);
+      clearTimeout(searchRenderTimer);
+      searchRenderTimer = setTimeout(() => { searchRenderTimer = null; renderQuickCopyList(panel); }, 100);
       queueProfilePanelStateSave();
     });
 
@@ -4248,6 +4518,7 @@
     const status = document.createElement("div");
     status.className = "arf-meta";
     status.dataset.role = "status";
+    status.setAttribute("role", "status");
     status.textContent = "资料只从本机读取。";
 
     const progress = document.createElement("div");
@@ -4322,8 +4593,10 @@
       return currentProfileLoadPromise;
     }
 
+    currentAiEnabled = false;
     currentProfileLoadPromise = (async () => {
       const settings = await sendRuntimeMessage({ type: "OJAF_GET_SETTINGS" });
+      currentAiEnabled = settings.apiConfig?.enabled === true;
       currentProfileV2 = settings.profileV2 || null;
       return currentProfileV2;
     })();
@@ -4452,12 +4725,18 @@
   }
 
   function getCurrentProfileSections() {
-    return profileV2ToProfileSections(currentProfileV2);
+    if (profileSectionsSource !== currentProfileV2) {
+      profileSectionsSource = currentProfileV2;
+      profileSectionsCache = profileV2ToProfileSections(currentProfileV2);
+    }
+    return profileSectionsCache;
   }
 
   function getCurrentProfileEntries() {
+    const sections = getCurrentProfileSections();
+    if (profileEntriesSource === sections) return profileEntriesCache;
     const entries = [];
-    for (const section of getCurrentProfileSections()) {
+    for (const section of sections) {
       for (const item of section.items) {
         const itemIndex = entries.length;
         entries.push({
@@ -4469,6 +4748,8 @@
         });
       }
     }
+    profileEntriesSource = sections;
+    profileEntriesCache = entries;
     return entries;
   }
 
@@ -4678,7 +4959,7 @@
   }
 
   function inferFieldLabel(field) {
-    if (field?.siteAdapterId === "hotjob" && field.label) {
+    if (["hotjob", "citicbank"].includes(field?.siteAdapterId) && field.label) {
       return normalizeHotjobFieldLabel(field.label);
     }
     const candidates = [];
@@ -4777,6 +5058,11 @@
   }
 
   function inferMatchSection(field) {
+    if (field?.siteAdapterId === "citicbank" && field.section) return field.section;
+    if (field?.siteAdapterId === "feishu-jobs" && field.section) {
+      const section = normalizeSectionHeadingText(field.section);
+      if (section) return section;
+    }
     if (field?.siteAdapterId === "hotjob" && field.section) {
       const section = normalizeHotjobSectionTitle(field.section);
       if (["基本信息", "自我描述", "教育经历", "实习经历", "项目经历", "语言能力", "培训经历", "计算机技能"].includes(section)) {
@@ -5702,7 +5988,7 @@
     if (/奖惩时间|获奖时间|奖励时间/.test(key)) {
       return "awardDate";
     }
-    if (/奖惩名称|获奖名称|奖励名称|奖项名称|荣誉名称/.test(key) || normalizeMatchKey(text) === "奖项") {
+    if (/奖惩名称|获奖名称|奖励名称|奖项名称|荣誉名称|所获荣誉/.test(key) || normalizeMatchKey(text) === "奖项") {
       return "awardName";
     }
     if (/颁奖单位|授奖单位|奖惩单位/.test(key)) {
@@ -5788,6 +6074,10 @@
   }
 
   function getFieldSemanticBucket(field, fieldLabel, fieldCategory) {
+    if (field?.siteAdapterId === "feishu-jobs") {
+      const explicit = getSemanticBucket(fieldLabel, fieldCategory);
+      if (explicit) return explicit;
+    }
     if (fieldCategory === "工作经历" && /^(工作职责|工作内容)$/.test(normalizeMatchKey(fieldLabel))) return "description";
     if (fieldCategory === "项目经历") {
       const label = normalizeMatchKey(fieldLabel || field?.label || "");
@@ -5802,6 +6092,19 @@
       if (fieldCategory === "教育经历" && /^(学历|学位|学历形式|学习形式|学习方式|是否挂科|班级排名|专业排名|成绩gpa|gpa|绩点|成绩)$/.test(explicit)) return getSemanticBucket(explicit, fieldCategory);
       if (/^(姓名|学校名称|专业名称|公司名称|职位名称|职务|项目绩效|项目成果|开始时间|结束时间)$/.test(explicit)) {
         return getSemanticBucket(explicit, fieldCategory);
+      }
+    }
+    // Repeated-record labels carry their own meaning.  Moka renders a whole
+    // record's sibling questions into nearbyText/groupText, so a date selector
+    // whose neighbours mention a city or an address would otherwise resolve to
+    // a location bucket that no date entry can ever satisfy.
+    if (REPEAT_RECORD_EXPLICIT_LABELS.includes(fieldCategory)) {
+      const explicit = normalizeMatchKey(fieldLabel || field?.label || "");
+      if (EXPLICIT_RECORD_LABEL_BUCKETS.test(explicit)) {
+        const explicitBucket = getSemanticBucket(explicit, fieldCategory);
+        if (explicitBucket) {
+          return explicitBucket;
+        }
       }
     }
     const useSemanticGroupContext =
@@ -6138,6 +6441,11 @@
   }
 
   function findRepeatItemRoot(element) {
+    return cachedScanRead("findRepeatItemRoot", element, () => readFindRepeatItemRoot(element));
+  }
+
+  function readFindRepeatItemRoot(element) {
+    if (element && citic?.active()) return citic.repeatRoot(element);
     if (!element) {
       return null;
     }
@@ -6177,6 +6485,7 @@
   }
 
   function getRepeatItemOccurrenceInfo(element) {
+    if (element && citic?.active()) return citic.repeatInfo(element);
     if (element && getActiveSiteAdapter()?.id === "zhiye") {
       const root = element.closest(".form[name]");
       if (root && getPhoenixSection(element)) {
@@ -6242,7 +6551,7 @@
   }
 
   function getOccurrenceMatchBonus(field, entry) {
-    if (["hotjob", "zhiye", "feishu-jobs"].includes(field?.siteAdapterId) && Number.isInteger(field.hotjobProfileIndex)) {
+    if (["hotjob", "zhiye", "feishu-jobs", "citicbank"].includes(field?.siteAdapterId) && Number.isInteger(field.hotjobProfileIndex)) {
       return isRepeatOccurrenceCompatible(field, entry) ? 24 : -1000;
     }
     const repeatItemIndex = Number(field?.repeatItemIndex || 0);
@@ -6269,7 +6578,7 @@
   }
 
   function isRepeatOccurrenceCompatible(field, entry, fieldCategory = "") {
-    if (["hotjob", "zhiye", "feishu-jobs"].includes(field?.siteAdapterId) && Number.isInteger(field.hotjobProfileIndex)) {
+    if (["hotjob", "zhiye", "feishu-jobs", "citicbank"].includes(field?.siteAdapterId) && Number.isInteger(field.hotjobProfileIndex)) {
       return field.hotjobProfileIndex >= 0 && entry?.valuePath?.itemIndex === field.hotjobProfileIndex &&
         entry?.valuePath?.sectionKey === field.hotjobProfileSectionKey;
     }
@@ -6341,15 +6650,62 @@
     return /^(姓名|电话|手机号|联系方式|工作单位|单位名称|公司|职务|职位|岗位|地址|住址|联系地址|通讯地址|关系|联系人|证明人|推荐人|学校|专业|学历|学位|部门|地点|城市|开始时间|结束时间)$/.test(labelKey);
   }
 
+  // Employer-defined Moka fields need explicit source contracts. Nearby text
+  // can include sibling questions and must never authorize a different fact.
+  function isProjectRoleLabel(label) {
+    return /^(职务|职位|岗位|角色|担任角色|项目角色|项目职责|本人职责|个人职责|项目中职责|担任职务|职责)$/.test(normalizeMatchKey(label));
+  }
+
+  function getMokaExplicitCandidateScore(field, entry, label) {
+    if (field.siteAdapterId !== "moka") return null;
+    const key = normalizeMatchKey(label);
+    const source = normalizeMatchKey(entry.label);
+    const summary = {
+      "毕业在读院校": /^(学校|学校名称|毕业院校|院校名称)$/,
+      "最高学历毕业院校": /^(学校|学校名称|毕业院校|院校名称)$/,
+      "最高学历专业": /^(专业|专业名称)$/,
+      "最高在读学历": /^(学历|学历层次)$/,
+      "最高学历培养方式": /^(培养方式|学习形式|学历形式|学习方式|教育类型)$/
+    };
+    if (summary[key]) {
+      if (entry.category !== "教育经历" || !summary[key].test(source)) return -1000;
+      const levels = getCurrentProfileEntries().filter((item) => item.category === "教育经历" && /^(学历|学位)$/.test(item.label));
+      const rank = (value) => /博士/.test(value) ? 5 : /硕士|研究生/.test(value) ? 4 : /本科|学士/.test(value) ? 3 : /专科|大专/.test(value) ? 2 : 1;
+      const best = levels.reduce((a, b) => !a || rank(b.value) > rank(a.value) ? b : a, null);
+      if (!best || entry.valuePath?.sectionKey !== best.valuePath?.sectionKey || entry.valuePath?.itemIndex !== best.valuePath?.itemIndex) return -1000;
+      return 115;
+    }
+    const contracts = [
+      [/^紧急联系电话$/, /^(紧急联系电话|紧急联系人电话|紧急联系人手机号)$/],
+      [/^手机区号$/, /^(手机区号|电话区号|国际区号)$/],
+      [/^证件类型$/, /^(证件类型|证件号码类型)$/],
+      [/^证件号码$/, /^(证件号码|身份证号|身份证号码)$/],
+      [/^主修课程$/, /^(主修课程|主要课程)$/],
+      [/^实验室名称$/, /^(实验室名称|实验室)$/],
+      [/^语种等级考试成绩$/, /^(语种等级考试成绩|考试成绩|语言成绩|外语成绩|成绩)$/]
+    ];
+    for (const [target, allowed] of contracts) {
+      if (target.test(key)) return allowed.test(source) ? null : -1000;
+    }
+    return null;
+  }
+
   function scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory) {
     if (!field || !entry) {
       return 0;
     }
 
+    const mokaScore = getMokaExplicitCandidateScore(field, entry, fieldLabel);
+    if (mokaScore !== null) return mokaScore;
+
     if (Object.prototype.hasOwnProperty.call(field, "manualProjectBinding")) {
       const binding = field.manualProjectBinding;
       if (!binding || entry.category !== "项目经历" || entry.valuePath?.sectionKey !== binding.sectionKey || entry.valuePath?.itemIndex !== binding.itemIndex) return -1000;
       if (field.singleProjectDescription) return entry.label === "项目描述" ? 125 : entry.label === "项目内容" ? 120 : -1000;
+      // A bound record may name the role 职责/本人职责 while the page says
+      // 职责/职务, and the two land in different semantic buckets.  Inside one
+      // record those are the same fact, so compare them as one role label.
+      if (isProjectRoleLabel(fieldLabel) && isProjectRoleLabel(entry.label)) return 120;
       const bucket = getSemanticBucket(fieldLabel, "项目经历");
       return normalizeMatchKey(fieldLabel) === normalizeMatchKey(entry.label) || (bucket && bucket === getSemanticBucket(entry.label, "项目经历")) ? 120 : -1000;
     }
@@ -6439,7 +6795,8 @@
 
     const optionText = getFieldOptionLabelsText(field, 180);
     const useGroupContext = shouldUseRepeatGroupContext(field, fieldLabel, fieldCategory);
-    const fieldText = compactText([
+    const fieldText = ["moka", "feishu-jobs"].includes(field.siteAdapterId) && !isGenericFieldLabel(fieldLabel)
+      ? compactText(fieldLabel) : compactText([
       fieldLabel,
       field.nearbyText,
       field.placeholder,
@@ -6460,6 +6817,8 @@
     if (!isCategoryCompatibleForMapping(fieldCategory, entry.category)) {
       return 0;
     }
+    if (field.siteAdapterId === "feishu-jobs" && ["教育经历", "实习经历", "工作经历"].includes(fieldCategory) &&
+        fieldCategory !== entry.category) return 0;
 
     // The page's personal fields frequently use a generic semantic bucket
     // (for example “英语等级” backed by a certificate note). The source-label
@@ -6700,6 +7059,7 @@
   }
 
   function getAutoFillScoreThreshold(field, fieldLabel, fieldCategory) {
+    if (field.feishuRecordCorrection) return 55;
     if (field.feishuProjectCorrection && /^(项目名称|项目链接|描述|项目描述|项目内容)$/.test(fieldLabel)) return 55;
     if (isFamilyScopedField(field, fieldLabel, fieldCategory) && requiresFamilyRelationGate(fieldLabel)) {
       return field.hasCurrentValue ? 90 : 62;
@@ -6771,7 +7131,7 @@
     const fieldLabel = field?.inferredLabel || inferFieldLabel(field);
     const fieldCategory = field?.inferredCategory || inferMatchSection(field);
     const personalKind = getPersonalFieldKind(fieldLabel);
-    if (field.githubTarget || Number.isInteger(field.feishuAwardIndex) || isPersonalFieldLabel(fieldLabel)) {
+    if (field.siteAdapterId === "moka" || field.githubTarget || Number.isInteger(field.feishuAwardIndex) || isPersonalFieldLabel(fieldLabel)) {
       if (scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory) < 32) return null;
     }
     if (!field.githubTarget && !isCategoryCompatibleForMapping(fieldCategory, entry.category)) {
@@ -7005,7 +7365,8 @@
     return {
       id: result?.id || "",
       ok: Boolean(result?.ok),
-      note: normalizeText(result?.note || "", 180)
+      note: normalizeText(result?.note || "", 180),
+      controlTrace: result?.controlTrace || []
     };
   }
 
@@ -7126,6 +7487,7 @@
 
     prepareFeishuRecords(enrichedFields, entries);
     bindHotjobRecords(enrichedFields, entries);
+    citic?.bindRecords(enrichedFields, entries);
     for (const field of enrichedFields) {
       if (!Object.prototype.hasOwnProperty.call(field, "manualProjectBinding")) continue;
       field.hotjobProfileIndex = field.manualProjectBinding?.itemIndex ?? -1;
@@ -7138,7 +7500,7 @@
     for (const field of scan?.fields || []) {
       const bound = hotjobBindings.get(field.fieldId);
       if (bound) {
-        for (const key of ["inferredLabel", "inferredCategory", "feishuAwardIndex", "githubTarget", "feishuProjectCorrection", "singleProjectDescription"]) field[key] = bound[key];
+        for (const key of ["inferredLabel", "inferredCategory", "feishuAwardIndex", "githubTarget", "feishuProjectCorrection", "feishuRecordCorrection", "singleProjectDescription"]) field[key] = bound[key];
         field.hotjobProfileIndex = bound.hotjobProfileIndex;
         field.hotjobProfileSectionKey = bound.hotjobProfileSectionKey;
       }
@@ -7443,7 +7805,23 @@
     for (const field of scan.fields || []) {
       if (!field.canFill || inferMatchSection(field) !== "项目经历") { active = null; continue; }
       const label = inferFieldLabel(field);
-      if (label === "项目名称" || !active || (field.repeatItemIndex != null && field.repeatItemIndex !== active.repeatIndex)) {
+      // Zero means no record boundary was recognized. Do not merge all such
+      // fields into one record, or attach leading dates to the preceding name.
+      if (!(Number(field.repeatItemIndex) > 0)) {
+        if (label === "项目名称") {
+          active = { fields: [field], repeatIndex: null }; groups.push(active);
+        } else if (/时间|日期|年月/.test(label) || active?.repeatIndex != null) {
+          active = null;
+        } else if (active) active.fields.push(field);
+        continue;
+      }
+      // Moka renders one record as a single repeat item whose dates and whose
+      // name/role/description are siblings, so the record boundary — not the
+      // 项目名称 label — must start a new group.  Splitting on the label alone
+      // paired one card's dates with one profile record and its text fields
+      // with another, which left the text fields unmatched.
+      const startsNewRecord = field.repeatItemIndex !== active?.repeatIndex;
+      if (!active || startsNewRecord) {
         active = { fields: [], repeatIndex: field.repeatItemIndex }; groups.push(active);
       }
       active.fields.push(field);
@@ -7565,15 +7943,19 @@
       setProfilePanelStatus("正在本地扫描当前页面并准备自动填写...");
       const baseScan = await scanForm();
       setAutofillProgress("整理表单字段", 42, `本地已发现 ${baseScan.fields.length} 个可见字段`);
-      const aiStructure = await enhanceScanWithAi(baseScan);
+      const aiStructure = currentAiEnabled ? await enhanceScanWithAi(baseScan) : { scan: baseScan };
       const scan = aiStructure.scan || baseScan;
       if (options.chooseProjects && !await chooseProjectOverwrites(scan)) return { ok: false, reason: "cancelled" };
       const localPlan = buildAutofillPlan(scan);
       let plan = localPlan;
 
       try {
-        const aiResult = await enhancePlanWithAi(scan, localPlan);
-        plan = aiResult.plan || plan;
+        if (currentAiEnabled) {
+          const aiResult = await enhancePlanWithAi(scan, localPlan);
+          plan = aiResult.plan || plan;
+        } else {
+          setAutofillProgress("匹配本地资料", 82, "AI 未启用，正在使用本地规则匹配");
+        }
       } catch (error) {
         setAutofillAiFallback("字段理解", error);
         setAutofillProgress("本地兜底匹配", 84, `AI 不可用，正在用本地规则兜底 ${scan.fields.length} 个字段`);
@@ -7712,6 +8094,7 @@
   }
 
   async function applyAutofillPlan(plan, autoFillIds, options = {}) {
+    if (disposed) return { ok: false, reason: "cancelled" };
     const runId = Number(options.runId || 0);
     if (autofillInProgress && !isCurrentAutofillRun(runId)) {
       setProfilePanelStatus("当前正在处理其他填写任务，请稍候。", true);
@@ -7735,13 +8118,17 @@
       setAutofillProgress("填写匹配项", 94, `本地准备填写 ${autoFillCandidates.length} 项`);
     }
     const results = [];
+    const retainedChoices = [];
 
     for (let index = 0; index < autoFillCandidates.length; index += 1) {
+      if (index % 8 === 0) await runtime.yieldToMain();
+      if (disposed || (runId && !isCurrentAutofillRun(runId))) return { ok: false, reason: "cancelled", results };
       const candidate = autoFillCandidates[index];
       const field = candidate.field;
       let element = await resolveFieldElement(field);
       let ok = false;
       let note = "";
+      let controlTrace = [];
 
       if (element) {
         if (candidate.alreadyMatches) {
@@ -7749,8 +8136,10 @@
           note = "当前值已匹配本机资料";
         } else {
           const fillResult = await fillElementSmart(element, candidate.value, field, candidate);
+          if (disposed) return { ok: false, reason: "cancelled", results };
           ok = Boolean(fillResult?.ok);
           note = fillResult?.reason || fillResult?.warning || "";
+          controlTrace = fillResult?.controlTrace || [];
         }
       } else {
         note = "未找到可自动填写控件";
@@ -7768,10 +8157,26 @@
       results.push({
         id: candidate.id,
         ok,
-        note
+        note,
+        controlTrace
       });
+      if (ok && getFieldControlAdapter(element)?.id === "moka-sd-select") {
+        retainedChoices.push({ live: runtime.createElementHandle(element), candidate, result: results[results.length - 1] });
+      }
+      // Export during a run must include completed fields, not only the plan.
+      if (lastAutofillDebug) lastAutofillDebug.results = results.map(summarizeDebugResult);
     }
 
+    await runtime.yieldToMain();
+    for (const { live, candidate, result } of retainedChoices) {
+      const current = live();
+      const targets = buildChoiceMatchTargets(normalizeText(candidate.value, 80));
+      if (!current || !targets.some(target => choiceTextMatches(getControlCurrentValue(current), target))) {
+        result.ok = false;
+        result.note = "后续字段填写后，下拉值被页面清除或改变，请手动确认";
+        if (current) markElement(current, "uncertain", result.note);
+      }
+    }
     const filledCount = results.filter((result) => result.ok).length;
     const failedCount = results.length - filledCount;
     const skippedCount = await markDeferredPlanCandidates(plan, autoFillSet);
@@ -8054,7 +8459,7 @@
     // a final fallback, but still require a successful read-back so a search
     // string is never reported as a completed selection.
     const input = getPhoenixDateInput(root);
-    if (input && !input.disabled) {
+    if (input && !input.disabled && !input.readOnly) {
       input.focus?.();
       setNativeValue(input, target);
       input.dispatchEvent?.(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
@@ -8106,12 +8511,7 @@
       : fail("日期选择后回读不一致，需核对");
   }
 
-  async function fillElementSmart(element, value, field, candidate) {
-    if (!element) {
-      return { ok: false, reason: "field not found" };
-    }
-
-    if (getFieldControlAdapter(element)?.id === "phoenix-radio") {
+  async function fillPhoenixRadio(element, value, field) {
       const root = element.closest(".phoenix-radio-group");
       const target = normalizeChoiceValue(value, field?.label || "");
       const options = Array.from(root.querySelectorAll(".phoenix-radio"));
@@ -8119,16 +8519,32 @@
       if (matches.length !== 1) return { ok: false, reason: "Phoenix 单选未找到唯一选项" };
       clickActionElement(matches[0]);
       await sleep(100);
-      return { ok: matches[0].classList.contains("phoenix-radio--checked"), reason: matches[0].classList.contains("phoenix-radio--checked") ? "" : "Phoenix 单选未确认选中" };
+      const selected = Array.from(root.querySelectorAll(".phoenix-radio"))
+        .find((node) => choiceTextMatches(getElementText(node.querySelector(".phoenix-radio__radio-text")), target) && node.classList.contains("phoenix-radio--checked"));
+      return { ok: Boolean(selected), reason: selected ? "" : "Phoenix 单选未确认选中" };
+  }
+
+  async function fillAdapterChoice(element, value, field) {
+    const surface = getControlSurfaceElement(element);
+    const controlTrace = [];
+    const result = await tryFillCustomChoiceField(surface || element, value, field, controlTrace);
+    return { ...result, controlTrace, adapterId: getFieldControlAdapter(element)?.id || "" };
+  }
+
+  async function fillElementSmart(element, value, field, candidate) {
+    if (disposed) return { ok: false, reason: "填写脚本已更新" };
+    if (!element) {
+      return { ok: false, reason: "field not found" };
     }
-    if (element.matches?.(".atsx-date-picker-period-month-label")) return fillFeishuPeriod(element, value);
-    if (getPhoenixDateRoot(element)) {
-      return fillPhoenixDate(element, value);
-    }
-    const type = getControlType(element);
-    if (element.disabled || element.getAttribute("aria-disabled") === "true") {
+
+    const controlAdapter = getFieldControlAdapter(element);
+    const controlRoot = getControlAdapterChoiceContainer(element) || element;
+    if (element.disabled || element.getAttribute?.("aria-disabled") === "true" || controlAdapter?.isDisabled?.(element) ||
+        controlRoot.matches?.('[aria-disabled="true"],.ant-select-disabled,.is-disabled,.arco-select-disabled,.t-is-disabled')) {
       return { ok: false, reason: "field disabled" };
     }
+    if (controlAdapter?.fill) return controlAdapter.fill(element, value, field, candidate);
+    const type = getControlType(element);
 
     if (type === "file") {
       return { ok: false, reason: "file upload requires manual selection" };
@@ -8148,25 +8564,6 @@
       return adapterResult;
     }
 
-    if (getFieldControlAdapter(element)?.id === "moka-sd-select") {
-      const surface = getControlSurfaceElement(element);
-      const choiceResult = await tryFillCustomChoiceField(surface || element, value, field);
-      return choiceResult.ok
-        ? { ...choiceResult, adapterId: "moka-sd-select" }
-        : { ...choiceResult, ok: false, adapterId: "moka-sd-select" };
-    }
-
-    // Phoenix autocomplete controls are React-managed inputs. Writing their
-    // value directly only changes the search text and leaves the form model
-    // empty, so always open the option layer and click the exact item.
-    if (getFieldControlAdapter(element)?.id === "phoenix-autocomplete") {
-      const surface = getControlSurfaceElement(element);
-      const choiceResult = await tryFillCustomChoiceField(surface || element, value, field);
-      return choiceResult.ok
-        ? { ...choiceResult, adapterId: "phoenix-autocomplete" }
-        : { ...choiceResult, ok: false, adapterId: "phoenix-autocomplete" };
-    }
-
     const editableTarget = resolveEditableTarget(element);
     if (editableTarget && editableTarget !== element) {
       element = editableTarget;
@@ -8175,9 +8572,9 @@
     const text = compactText([candidate?.fieldLabel, field?.nearbyText, field?.placeholder, field?.name, field?.id, field?.section].join(" "));
     const isChoiceField = candidate?.writeMode === "choice" || /选择|请选择|下拉|选择项|单选/.test(text);
 
-    if (candidate?.writeMode === "date") {
-      setNativeValue(element, normalizeDateValue(value));
-      return { ok: true };
+    if (candidate?.writeMode === "date" && type !== "select" && type !== "combobox") {
+      if (element.readOnly) return { ok: false, reason: "只读日期需要控件专用选择器" };
+      return writeTextAndVerify(element, normalizeDateValue(value));
     }
 
     if (element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)) {
@@ -8189,38 +8586,43 @@
     }
 
     if (type === "combobox") {
-      const choiceResult = await tryFillCustomChoiceField(element, value, field);
-      if (choiceResult.ok) {
-        return choiceResult;
-      }
-
-      const textInput = element.querySelector?.('input:not([type="hidden"]),textarea,[contenteditable="true"]');
-      if (textInput && textInput !== element) {
-        setNativeValue(textInput, value);
-        return { ok: true, warning: "combobox fallback wrote into inner input only" };
-      }
+      return tryFillCustomChoiceField(element, value, field);
     }
 
     if (element instanceof HTMLSelectElement) {
+      const live = runtime.createElementHandle(element);
       const matched = setSelectValue(element, value);
-      return { ok: true, warning: matched ? "" : "下拉选项需要手动确认，已尝试按原值填写" };
+      if (!matched) return { ok: false, reason: "原生下拉未找到唯一选项" };
+      const selected = element.value;
+      await runtime.yieldToMain();
+      const ok = live()?.value === selected;
+      return { ok, reason: ok ? "" : "下拉选择被页面回退" };
     }
 
     if (element.isContentEditable) {
-      setContentEditableValue(element, value);
-      return { ok: true };
+      return writeTextAndVerify(element, value);
     }
 
     if (isChoiceField) {
-      const choiceResult = await tryFillCustomChoiceField(element, value, field);
-      if (choiceResult.ok) {
-        return choiceResult;
-      }
+      return tryFillCustomChoiceField(element, value, field);
     }
 
-    element.focus();
-    setNativeValue(element, value);
-    return { ok: true };
+    if (element.readOnly) return { ok: false, reason: "只读控件未执行文本兜底" };
+    return writeTextAndVerify(element, value);
+  }
+
+  async function writeTextAndVerify(element, value) {
+    if (element.disabled || element.readOnly) return { ok: false, reason: "控件不可写入" };
+    const live = runtime.createElementHandle(element);
+    element.focus?.();
+    if (element.isContentEditable) setContentEditableValue(element, value);
+    else setNativeValue(element, value);
+    element.blur?.();
+    await runtime.yieldToMain();
+    const current = live();
+    const actual = current?.isContentEditable ? current.textContent : current?.value;
+    const ok = Boolean(current) && String(actual ?? "").replace(/\r\n/g, "\n") === String(value ?? "").replace(/\r\n/g, "\n");
+    return { ok, reason: ok ? "" : "写入后页面未保留完整目标值" };
   }
 
   function resolveEditableTarget(element) {
@@ -8356,6 +8758,43 @@
       return "否";
     }
     return text;
+  }
+
+  // Equivalent spellings a dropdown may use for the value the profile holds.
+  // The profile stores dates as 2026-06 while Moka renders 2026年6月, and a
+  // graduation control reads a plain year where the profile has a full date.
+  function buildChoiceMatchTargets(target) {
+    const text = String(target || "").trim();
+    if (!text) {
+      return [];
+    }
+
+    const variants = [text];
+    // Known degree decorations are equivalent; arbitrary substring matches
+    // (e.g. 英语 -> 英语四级) remain disallowed.
+    const degree = text.match(/^(大学本科|本科|学士|硕士|博士)[（(](?:本科|学士|硕士|博士|研究生)[)）]$/);
+    if (degree) variants.push(degree[1]);
+    const yearMonth = text.match(/^(\d{4})\s*[-/.年]?\s*(\d{1,2})\s*月?$/);
+    if (yearMonth) {
+      const [, year, month] = yearMonth;
+      const padded = String(month).padStart(2, "0");
+      variants.push(
+        `${year}年${Number(month)}月`,
+        `${year}年${padded}月`,
+        `${year}-${padded}`,
+        `${year}/${padded}`,
+        `${year}.${padded}`,
+        `${year}年`,
+        year
+      );
+    } else {
+      const yearOnly = text.match(/^(\d{4})$/);
+      if (yearOnly) {
+        variants.push(`${yearOnly[1]}年`);
+      }
+    }
+
+    return [...new Set(variants.filter(Boolean))];
   }
 
   function normalizeDateValue(value) {
@@ -8528,124 +8967,143 @@
     return fail("Phoenix 确认后未读到目标值");
   }
 
-  async function tryFillCustomChoiceField(element, value, field) {
+  async function tryFillCustomChoiceField(element, value, field, controlTrace = []) {
     const container = findChoiceFieldContainer(element);
-    if (!container) {
-      return { ok: false, reason: "no choice container found" };
-    }
-
-    const controlAdapter = getFieldControlAdapter(element);
-    if (controlAdapter?.id === "phoenix-autocomplete") {
-      const previous = getVisiblePhoenixSelector();
-      if (previous) { closePhoenixSelector(previous); await sleep(120); }
-    }
-    container.scrollIntoView({ block: "center", inline: "nearest" });
-    clickActionElement(element instanceof Element ? element : container);
-    // Phoenix's trigger is the managed input itself. Clicking the outer
-    // wrapper immediately afterwards can toggle the popup closed, so leave it
-    // open and search its portal-rendered options.
-    if (container !== element && controlAdapter?.id !== "phoenix-autocomplete") {
-      clickActionElement(container);
-    }
-    await sleep(220);
-
-    if (controlAdapter?.id === "phoenix-autocomplete") {
-      let popup = null;
-      for (let attempt = 0; attempt < 10 && !popup; attempt += 1) {
-        popup = getVisiblePhoenixSelector();
-        if (!popup) await sleep(100);
-      }
-      if (popup?.querySelector(".selector-footer-button,.area-selector-container")) return tryFillPhoenixSelector(element, value, popup);
-      if (popup) {
-        const target = normalizeChoiceValue(value, inferFieldLabel(field));
-        const options = Array.from(popup.querySelectorAll(".phoenix-selectList__listItem"))
-          .filter((option) => isVisible(option) && choiceTextMatches(getElementText(option), target));
-        if (options.length !== 1) { closePhoenixSelector(popup); return { ok: false, reason: "Phoenix 普通下拉未找到唯一选项" }; }
-        options[0].click();
-        for (let attempt = 0; attempt < 8; attempt += 1) {
-          await sleep(100);
-          if (choiceTextMatches(getControlCurrentValue(element), target)) return { ok: true };
-        }
-        closePhoenixSelector(popup);
-        return { ok: false, reason: "Phoenix 普通下拉点击后未回填" };
-      }
-      return { ok: false, reason: "Phoenix 未找到唯一活动弹层" };
-    }
-
-    const target = normalizeChoiceValue(value, inferFieldLabel(field));
-    const confirmPhoenixSelection = async () => {
-      if (controlAdapter?.id !== "phoenix-autocomplete") {
-        return true;
-      }
-      for (let attempt = 0; attempt < 8; attempt += 1) {
-        if (choiceTextMatches(getControlCurrentValue(element), target)) {
-          return true;
-        }
-        await sleep(60);
-      }
-      return false;
+    if (!container) return { ok: false, reason: "未找到控件容器" };
+    const adapter = getFieldControlAdapter(element);
+    const phoenix = adapter?.id === "phoenix-autocomplete";
+    const sd = adapter?.id === "moka-sd-select";
+    const bufferedSearch = sd || adapter?.id === "feishu-select";
+    const previous = phoenix ? getVisiblePhoenixSelector() : null;
+    if (previous) { closePhoenixSelector(previous); await runtime.yieldToMain(); }
+    const session = runtime.createChoiceSession(element, { container, isVisible,
+      ...(phoenix ? { popupSelector: ".common-unmodeled-layer" } : {}) });
+    // Numeric SD options are literal values; January must not become "是".
+    const target = sd ? normalizeText(value, 80) : normalizeChoiceValue(value, inferFieldLabel(field));
+    const targets = buildChoiceMatchTargets(target);
+    const selector = ['[role="option"]', 'li', '.ant-select-dropdown-menu-item',
+      '.phoenix-selectList__listItem', ...getControlAdapterOptionSelectors(element)].join(',');
+    const readOptions = () => session.options(selector);
+    const findMatch = () => runtime.uniqueOption(readOptions(), targets, choiceTextMatches, getElementText);
+    const input = element instanceof HTMLInputElement ? element : container.querySelector?.('input:not([type="hidden"])');
+    const liveInput = input ? runtime.createElementHandle(input) : () => null;
+    const trace = (phase) => {
+      if (!bufferedSearch) return;
+      const current = session.liveTrigger();
+      controlTrace.push({ phase, hasValue: Boolean(getControlCurrentValue(current)),
+        matchesTarget: targets.some(target => choiceTextMatches(getControlCurrentValue(current), target)),
+        popupVisible: Boolean(session.resolvePopup()), focused: document.activeElement === liveInput() });
     };
-    const hierarchicalResult = await tryFillHierarchicalChoiceOptions(value, target, element);
-    if (hierarchicalResult.ok) {
-      return await confirmPhoenixSelection()
-        ? hierarchicalResult : { ok: false, reason: "Phoenix 地区选择未回填" };
-    }
-
-    const options = findVisibleChoiceOptions(container, element);
-    const matched = options.find((option) => choiceTextMatches(getElementText(option), target) || choiceTextMatches(option.getAttribute("aria-label") || "", target));
-
-    if (matched) {
-      clickActionElement(matched);
-      await sleep(120);
-      return await confirmPhoenixSelection()
-        ? { ok: true }
-        : { ok: false, reason: "Phoenix 下拉选项点击后未确认选中值" };
-    }
-
-    const searchInput =
-      element instanceof HTMLInputElement
-        ? element
-        : container.querySelector?.('input:not([type="hidden"]),textarea,[contenteditable="true"]');
-    if (searchInput && controlAdapter?.id !== "phoenix-autocomplete") {
-      setNativeValue(searchInput, value);
-      await sleep(160);
-      const retryOptions = findVisibleChoiceOptions(container, element);
-      const retryMatched = retryOptions.find((option) => choiceTextMatches(getElementText(option), target) || choiceTextMatches(option.getAttribute("aria-label") || "", target));
-      if (retryMatched) {
-        clickActionElement(retryMatched);
-        await sleep(120);
-        return await confirmPhoenixSelection()
-          ? { ok: true }
-          : { ok: false, reason: "Phoenix 下拉选项点击后未确认选中值" };
+    const originalQuery = input?.value || "";
+    let searched = false, succeeded = false;
+    try {
+      const openTarget = adapter?.getOpenTarget?.(element) || element;
+      openTarget.focus?.();
+      clickActionElement(openTarget);
+      let popup = await session.waitFor(() => session.resolvePopup(), { timeout: 350 });
+      if (!popup && container !== element && !phoenix && !adapter?.getOpenTarget) {
+        clickActionElement(container);
+        popup = await session.waitFor(() => session.resolvePopup());
       }
+      if (!popup && (phoenix || adapter?.getOpenTarget)) popup = await session.waitFor(() => session.resolvePopup());
+      if (disposed) return { ok: false, reason: "填写脚本已更新" };
+      // Remote autocomplete can create its menu only after typing. Waiting for
+      // a menu before searching makes schools/majors fail before any query.
+      if (!popup && bufferedSearch && input && !input.readOnly && !input.disabled) {
+        searched = true;
+        input.focus?.();
+        setNativeValue(liveInput() || input, target, { searchOnly: true });
+        trace("searched");
+        popup = await session.waitFor(() => session.resolvePopup(), { timeout: 1800 });
+      }
+      if (!popup) return { ok: false, reason: "未找到属于当前字段的活动弹层" };
+      trace("opened");
+      if (phoenix && popup.querySelector('.selector-footer-button,.area-selector-container')) {
+        const result = await tryFillPhoenixSelector(element, value, popup);
+        succeeded = result.ok;
+        return result;
+      }
+      if (!phoenix && splitHierarchicalChoiceValue(value).length > 1) {
+        const result = await tryFillHierarchicalChoiceOptions(value, target, element, session);
+        succeeded = result.ok;
+        return result;
+      }
+      let match = await session.waitFor(findMatch, { timeout: 300 });
+      if (disposed) return { ok: false, reason: "填写脚本已更新" };
+      if (!match && input && !input.readOnly && !input.disabled) {
+        if (!searched) {
+          searched = true;
+          if (bufferedSearch) (liveInput() || input).focus?.();
+          setNativeValue(liveInput() || input, target, { searchOnly: bufferedSearch });
+          trace("searched");
+        }
+        match = await session.waitFor(findMatch, { timeout: 1800 });
+      }
+      // Virtual lists render only one viewport. Scroll only this popup, with a
+      // bounded number of steps, and re-query after the framework replaces rows.
+      if (!match) {
+        popup = session.resolvePopup();
+        const scroll = [popup, ...Array.from(popup?.querySelectorAll?.('*') || [])]
+          .find((node) => node && node.scrollHeight > node.clientHeight + 8 && node.clientHeight > 0 && /auto|scroll/.test(window.getComputedStyle(node).overflowY));
+        for (let page = 0; scroll && page < 8 && !match && !disposed; page++) {
+          const before = scroll.scrollTop;
+          scroll.scrollTop += Math.max(40, scroll.clientHeight * 0.8);
+          if (scroll.scrollTop === before) break;
+          scroll.dispatchEvent(new Event('scroll', { bubbles: true }));
+          match = await session.waitFor(findMatch, { timeout: 200 });
+        }
+      }
+      if (!match || disposed) return { ok: false, reason: "未找到唯一精确选项，未将搜索文字当作选中值" };
+      clickActionElement(adapter?.getOptionClickTarget?.(match) || match);
+      trace("clicked");
+      await adapter?.settleSelection?.(session.liveTrigger(), targets);
+      trace("settled");
+      const verified = await session.waitFor(() => {
+        const current = session.liveTrigger();
+        if (!current) return false;
+        const actual = getControlCurrentValue(current);
+        const valueMatches = targets.some((candidate) => choiceTextMatches(actual, candidate));
+        const popup = session.resolvePopup();
+        const selected = session.options('[aria-selected="true"],.is-selected,.ant-select-item-option-selected,.phoenix-selectList__listItem--selected', popup)
+          .some((node) => targets.some((candidate) => choiceTextMatches(getElementText(node), candidate)));
+        return valueMatches && (!popup || selected);
+      }, { timeout: 1400, stableFor: 80 });
+      succeeded = Boolean(verified);
+      trace("verified");
+      return verified ? { ok: true } : { ok: false, reason: "选项点击后未确认正式选中状态" };
+    } finally {
+      if (!disposed && !bufferedSearch && !succeeded && searched && liveInput()) setNativeValue(liveInput(), originalQuery);
+      if (phoenix) {
+        const popup = session.resolvePopup();
+        if (popup) closePhoenixSelector(popup);
+      } else if (bufferedSearch) {
+        // The selector owns its search buffer. Never restore it using change/blur or send
+        // Escape after a successful selection: either can undo the selection.
+        if (!disposed && !succeeded) liveInput()?.blur();
+      } else session.close();
+      trace("cleanup");
     }
-
-    return { ok: false, reason: "no matching option found" };
   }
 
-  async function tryFillHierarchicalChoiceOptions(value, target, element = null) {
+  async function tryFillHierarchicalChoiceOptions(value, target, element = null, session = null) {
     const parts = splitHierarchicalChoiceValue(value);
-    if (parts.length < 2) {
-      return { ok: false, reason: "not hierarchical" };
-    }
-
-    let matchedAny = false;
+    if (parts.length < 2 || !session) return { ok: false, reason: "缺少级联路径或控件作用域" };
+    const selector = ['[role="option"]', '.ant-cascader-menu-item', '.el-cascader-node', '.arco-cascader-node', '.t-cascader__item'].join(',');
     for (const part of parts) {
-      const options = findVisibleChoiceOptions(document, element);
-      const matched = options.find((option) => {
-        const text = getElementText(option);
-        return choiceTextMatches(text, part) || choiceTextMatches(text, target);
-      });
-      if (!matched) {
-        return matchedAny ? { ok: true, warning: "hierarchical choice partially matched" } : { ok: false, reason: "no matching hierarchical option" };
-      }
-
-      clickActionElement(matched);
-      matchedAny = true;
-      await sleep(180);
+      const option = await session.waitFor(() => runtime.uniqueOption(session.options(selector), [part], choiceTextMatches, getElementText));
+      if (disposed) return { ok: false, reason: "填写脚本已更新" };
+      if (!option) return { ok: false, reason: "级联路径未完整匹配，需要人工确认" };
+      clickActionElement(option);
+      await runtime.yieldToMain();
     }
-
-    return { ok: matchedAny };
+    const verified = await session.waitFor(() => {
+      const current = session.liveTrigger();
+      if (!current) return false;
+      const actual = getControlCurrentValue(current);
+      return choiceTextMatches(actual, target) ||
+        (parts.every((part) => normalizeChoiceLabel(actual).includes(normalizeChoiceLabel(part))) && !session.resolvePopup());
+    }, { stableFor: 80 });
+    return { ok: Boolean(verified), reason: verified ? "" : "级联选项未回填完整路径" };
   }
 
   function splitHierarchicalChoiceValue(value) {
@@ -8654,8 +9112,10 @@
       return [];
     }
 
+    const explicit = text.split(/\s*(?:\/|>|→|›|\|)\s*/).filter(Boolean);
+    if (explicit.length > 1) return explicit;
     const parts = text.match(/[^省市区县]+(?:省|市|区|县)|[^自治区]+自治区/g) || [];
-    const normalized = parts.map((part) => normalizeText(part, 40)).filter(Boolean);
+    const normalized = parts.map((part) => normalizeText(part, 40).replace(/^[\s,，、-]+/, "")).filter(Boolean);
     return normalized.length >= 2 ? normalized : [];
   }
 
@@ -8690,61 +9150,16 @@
     return element.parentElement || element;
   }
 
-  function findVisibleChoiceOptions(container, element = null) {
-    const adapter = getFieldControlAdapter(element || container);
-    const selectors = [
-      '[role="option"]',
-      "[aria-selected]",
-      "li",
-      ".ant-select-item-option",
-      ".rc-select-item-option",
-      ".ant-cascader-menu-item",
-      ".ant-picker-cell",
-      '[class*="option"]',
-      '[class*="Option"]',
-      '[class*="select-item"]',
-      '[class*="dropdown-item"]',
-      ...getControlAdapterOptionSelectors(element || container)
-    ].join(",");
-    const roots = [container && container.querySelectorAll ? container : null, document].filter(Boolean);
-    const surface = element ? getControlSurfaceElement(element) : null;
-    const seen = new Set();
-    const options = [];
-
-    for (const scope of roots) {
-      for (const option of Array.from(scope.querySelectorAll(selectors))) {
-        if (!(option instanceof Element) || seen.has(option)) {
-          continue;
-        }
-        seen.add(option);
-        if (option.closest(`#${PANEL_ID}`)) {
-          continue;
-        }
-        if (adapter?.id === "layui" && scope === document) {
-          const optionProxy = option.closest(".layui-form-select");
-          if (surface && optionProxy && optionProxy !== surface && !optionProxy.classList.contains("layui-form-selected")) {
-            continue;
-          }
-        }
-        if (!isVisible(option)) {
-          continue;
-        }
-        const text = getElementText(option);
-        if (text && text.length <= 120) {
-          options.push(option);
-        }
-      }
-    }
-
-    return options;
-  }
-
   function renderQuickCopyList(panel) {
     const list = panel.querySelector('[data-role="quick-copy-list"]');
     if (!list) {
       return;
     }
 
+    const renderKey = `${sidebarFilter}|${activeProfileCategory}|${Boolean(currentProfileLoadPromise)}`;
+    const previous = listRenderState.get(list);
+    if (previous?.profile === currentProfileV2 && previous.key === renderKey) return;
+    listRenderState.set(list, { profile: currentProfileV2, key: renderKey });
     list.textContent = "";
 
     if (!hasCurrentProfileData()) {
@@ -8925,6 +9340,28 @@
     return profileV2;
   }
 
+  async function fillFocusedProfileItem(item) {
+    const target = focusedPageControl;
+    if (!target?.isConnected || !item.hasValue) {
+      setProfilePanelStatus("请先点击网页中要填写的字段，再点资料旁的“填入”。", true);
+      return;
+    }
+    const runId = startAutofillRun("填写选中字段");
+    if (!runId) { setProfilePanelStatus("当前正在填写，请稍候。", true); return; }
+    let result;
+    let field;
+    try {
+      field = buildFieldMeta(target);
+      result = await fillElementSmart(target, item.value, field, { fieldLabel: field.label, writeMode: guessAutofillValueFieldType(field) });
+      markElement(target, result.ok ? "filled" : "uncertain");
+    } catch (error) { result = { ok: false, reason: error.message }; }
+    finally { clearAutofillProgress(); }
+    updateAutofillDebugResults({ attempted: 1, filled: result.ok ? 1 : 0,
+      failed: result.ok ? 0 : 1, total: 1 }, [{ id: field?.fieldId || "focused-field",
+      ok: result.ok, note: result.reason || "", controlTrace: result.controlTrace || [] }]);
+    setProfilePanelStatus(result.ok ? `已填入选中的字段：${item.label}` : `未完成：${result.reason || "请手动确认控件"}`, !result.ok);
+  }
+
   async function copyProfileItem(item) {
     if (!item?.hasValue) {
       setProfilePanelStatus("当前条目没有可复制的内容。", true);
@@ -8981,6 +9418,7 @@
     cancel.textContent = "取消";
     cancel.title = `取消编辑${item.label}`;
     cancel.addEventListener("click", () => {
+      listRenderState.delete(row.closest('[data-role="quick-copy-list"]'));
       renderProfilePanel();
     });
     actions.append(save, cancel);
@@ -8988,6 +9426,7 @@
     editor.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        listRenderState.delete(row.closest('[data-role="quick-copy-list"]'));
         renderProfilePanel();
         return;
       }
@@ -9083,7 +9522,15 @@
           beginProfileItemEdit(row, item);
         });
 
-        actions.append(copyButton, editButton);
+        const fillButton = document.createElement("button");
+        fillButton.type = "button";
+        fillButton.className = "arf-row-action";
+        fillButton.textContent = "填入";
+        fillButton.dataset.action = "fill-focused";
+        fillButton.disabled = !item.hasValue;
+        fillButton.title = "先点击网页目标字段，再填入这一项";
+        fillButton.addEventListener("click", () => { void fillFocusedProfileItem(item); });
+        actions.append(fillButton, copyButton, editButton);
         row.append(label, valueMain, actions);
         card.append(row);
       }
@@ -9145,7 +9592,20 @@
     return `${lines.join("\n").trim()}\n`;
   }
 
+  function renderProfileProgress() {
+    if (!profilePanel || !profilePanelVisible) return;
+    const progress = profilePanel.querySelector('[data-role="progress"]');
+    if (progress) progress.hidden = !autofillProgress.active;
+    const fill = profilePanel.querySelector('[data-role="progress-fill"]');
+    if (fill) fill.style.transform = `scaleX(${getDisplayedProgressPercent() / 100})`;
+    for (const [role, value] of [["progress-stage", getAutofillProgressTitle()], ["progress-detail", getAutofillProgressDetail()]]) {
+      const node = profilePanel.querySelector(`[data-role="${role}"]`);
+      if (node && node.textContent !== value) node.textContent = value;
+    }
+  }
+
   function renderProfilePanel() {
+    if (disposed) return;
     const panel = ensureProfilePanel();
     const status = panel.querySelector('[data-role="status"]');
     const collapseBtn = panel.querySelector('[data-action="collapse"]');
@@ -9178,7 +9638,7 @@
     }
     if (progress && progressFill && progressStage && progressDetail) {
       progress.hidden = !autofillProgress.active;
-      progressFill.style.width = `${getDisplayedProgressPercent()}%`;
+      progressFill.style.transform = `scaleX(${getDisplayedProgressPercent() / 100})`;
       progressStage.textContent = autofillProgress.active
         ? getAutofillProgressTitle() || "处理中"
         : "";
@@ -9225,8 +9685,7 @@
     }
   }
 
-  if (chrome?.storage?.onChanged) {
-    chrome.storage.onChanged.addListener((changes, areaName) => {
+  const profileStorageListener = (changes, areaName) => {
       if (areaName !== "local" || !changes.profileV2) {
         return;
       }
@@ -9235,12 +9694,12 @@
       if (profilePanelVisible) {
         renderProfilePanel();
       }
-    });
-  }
+  };
+  chrome?.storage?.onChanged?.addListener(profileStorageListener);
 
   void restoreProfilePanelState();
 
-  function setNativeValue(element, value) {
+  function setNativeValue(element, value, { searchOnly = false } = {}) {
     const stringValue = value == null ? "" : String(value);
     const prototype =
       element instanceof HTMLTextAreaElement
@@ -9258,10 +9717,11 @@
       element.value = stringValue;
     }
 
-    if (element.setAttribute && element instanceof HTMLInputElement) {
+    if (!searchOnly && element.setAttribute && element instanceof HTMLInputElement) {
       element.setAttribute("value", stringValue);
     }
     element.dispatchEvent(new Event("input", { bubbles: true }));
+    if (searchOnly) return;
     element.dispatchEvent(new Event("change", { bubbles: true }));
     element.dispatchEvent(new Event("blur", { bubbles: true }));
   }
@@ -9286,28 +9746,14 @@
   }
 
   function setSelectValue(element, value) {
-    const stringValue = String(value || "").trim();
-    const normalizedTarget = normalizeChoiceLabel(stringValue);
-    const matchedOption = Array.from(element.options).find((option) => {
-      const optionValue = normalizeText(option.value || "", 120);
-      const optionLabel = normalizeText(option.textContent || "", 120);
-      return (
-        option.value === stringValue ||
-        optionLabel === stringValue ||
-        normalizeChoiceLabel(optionValue) === normalizedTarget ||
-        normalizeChoiceLabel(optionLabel) === normalizedTarget ||
-        optionLabel.includes(stringValue) ||
-        stringValue.includes(optionLabel)
-      );
-    });
-
-    if (matchedOption) {
-      setNativeValue(element, matchedOption.value);
-      return true;
-    }
-
-    setNativeValue(element, stringValue);
-    return false;
+    const target = String(value ?? "");
+    const options = Array.from(element.options || []).filter((option) => !option.disabled && !option.parentElement?.disabled);
+    const exact = options.filter((option) => option.value === target || option.textContent.trim() === target);
+    const equivalent = exact.length ? exact : options.filter((option) => buildChoiceMatchTargets(target)
+      .some((candidate) => choiceTextMatches(option.textContent, candidate) || choiceTextMatches(option.value, candidate)));
+    if (equivalent.length !== 1) return false;
+    setNativeValue(element, equivalent[0].value);
+    return element.value === equivalent[0].value;
   }
 
   function setContentEditableValue(element, value) {
@@ -9492,6 +9938,34 @@
 
     return undefined;
   }
+
+  function trackFocusedPageControl(event) {
+    const target = event.target;
+    if (!(target instanceof Element) || target.closest(`#${PANEL_ID},#${FLOAT_ID},[role="listbox"],.common-unmodeled-layer`)) return;
+    const control = target.closest(CONTROL_SELECTOR);
+    if (control) focusedPageControl = getLogicalControlElement(control);
+  }
+
+  function onVisibilityChange() { updateAutofillProgressTimer(); }
+  document.addEventListener?.("focusin", trackFocusedPageControl, true);
+  document.addEventListener?.("pointerdown", trackFocusedPageControl, true);
+  document.addEventListener?.("visibilitychange", onVisibilityChange);
+  window.__OJAF_AUTOFILL_DISPOSE__ = () => {
+    disposed = true;
+    autofillRunId += 1;
+    autofillInProgress = false;
+    window.clearInterval?.(autofillProgressTimer);
+    clearTimeout(profilePanelStateSaveTimer);
+    clearTimeout(searchRenderTimer);
+    runtime?.dispose();
+    chrome?.storage?.onChanged?.removeListener(profileStorageListener);
+    document.removeEventListener?.("focusin", trackFocusedPageControl, true);
+    document.removeEventListener?.("pointerdown", trackFocusedPageControl, true);
+    document.removeEventListener?.("visibilitychange", onVisibilityChange);
+    document.getElementById?.(STYLE_ID)?.remove();
+    document.getElementById?.(PANEL_ID)?.remove();
+    document.getElementById?.(FLOAT_ID)?.remove();
+  };
 
   const messageHandler = (message, _sender, sendResponse) => {
     if (!message || typeof message.type !== "string" || !message.type.startsWith("OJAF_")) {

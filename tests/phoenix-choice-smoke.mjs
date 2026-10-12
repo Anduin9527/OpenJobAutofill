@@ -20,7 +20,7 @@ const popup = {
   }
 };
 const context = vm.createContext({
-  window: {}, MouseEvent: class {constructor(type) {this.type=type;}},
+  window: {}, disposed: false, MouseEvent: class {constructor(type) {this.type=type;}},
   document: {querySelectorAll: () => []}, isVisible: () => true,
   choiceTextMatches: (a,b) => a === b,
   getElementText: n => n?.innerText || '',
@@ -52,10 +52,27 @@ assert.equal(vm.runInContext('getVisiblePhoenixSelector()', context), null);
 console.log('Phoenix selector: navigation, icon selection, confirmation, rejected commit, missing leaf, hidden/ambiguous portals passed');
 // Exercise routing through the public choice helper, not just the modal helper.
 vm.runInContext(source.slice(source.indexOf('  async function tryFillCustomChoiceField('), source.indexOf('  async function tryFillHierarchicalChoiceOptions(')) + ';this.fillChoice = tryFillCustomChoiceField;', context);
-class Trigger {scrollIntoView() {} click() {}}
+class Trigger {scrollIntoView() {} click() {} querySelector() { return null; }}
 const trigger = new Trigger();
 Object.assign(context, {Element: Trigger, findChoiceFieldContainer: () => trigger,
   getFieldControlAdapter: () => ({id: 'phoenix-autocomplete'}),
+  HTMLInputElement: class {},
+  buildChoiceMatchTargets: value => [value], getControlAdapterOptionSelectors: () => [],
+  runtime: {
+    yieldToMain: async () => {},
+    createChoiceSession: () => ({
+      resolvePopup: () => actual ? null : context.document.querySelectorAll().find(n => n !== hidden) || null,
+      liveTrigger: () => trigger,
+      options: (selector) => selector.includes('aria-selected')
+        ? actual ? [node(actual)] : []
+        : context.document.querySelectorAll().find(n => n !== hidden)?.querySelectorAll(selector) || [],
+      waitFor: async read => read(), close() {}
+    }),
+    uniqueOption: (options,targets,matches,read) => {
+      const found=options.filter(n=>targets.some(t=>matches(read(n),t)));
+      return found.length===1?found[0]:null;
+    }
+  },
   normalizeChoiceValue: value => value, inferFieldLabel: () => '示例字段'});
 const plain = {getBoundingClientRect: () => ({right: 500, bottom: 400}),
   querySelector: selector => selector.includes('phoenix-selectList') ? {} : null,

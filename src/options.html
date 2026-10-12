@@ -110,6 +110,12 @@
         <form id="settingsForm" class="card">
           <h2>API 设置（可选，用于 AI 页面分析）</h2>
 
+          <label class="checkline">
+            <input id="aiEnabled" type="checkbox" />
+            <span>启用 AI 辅助识别与匹配</span>
+          </label>
+          <p class="field-help">默认关闭：仅用本地规则，不自动请求 AI API。配置 API 后需勾选并保存才会启用。</p>
+
           <label>
             API 模式
             <select id="apiMode">
