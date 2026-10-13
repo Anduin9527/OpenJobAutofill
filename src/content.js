@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "1.2.11-geely-moka";
+  const SCRIPT_VERSION = "1.2.12-zhiye-records";
 
   if (window.__OJAF_AUTOFILL_VERSION__ === SCRIPT_VERSION) {
     return;
@@ -2417,26 +2417,34 @@
       工作经历: new Set(["单位名称", "公司名称", "公司", "工作单位"]),
       项目经历: new Set(["项目名称"])
     };
+    const identityFieldsOf = (group) => group.filter(field => identityEntryLabels[group[0].inferredCategory]
+      .has(normalizeHotjobFieldLabel(field.siteAdapterId === "zhiye"
+        ? normalizeZhiyeRecordIdentityLabel(field.inferredLabel) : field.inferredLabel)));
+    const scopeOf = (field) => `${field.siteAdapterId}|${field.inferredCategory}|${field.repeatItemScopeKey || ""}`;
     const groups = new Map();
     for (const field of fields) {
       const isZhiyeRepeat = field.siteAdapterId === "zhiye" && identityLabels[field.inferredCategory];
       if (!(field.siteAdapterId === "hotjob" || isZhiyeRepeat) || field.repeatItemIndex == null || !identityLabels[field.inferredCategory]) continue;
-      const key = `${field.inferredCategory}|${field.repeatItemIndex}`;
+      const key = `${scopeOf(field)}|${field.repeatItemIndex}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(field);
     }
-    const emptyZhiyeProjects = fields.filter((field) =>
-      field.siteAdapterId === "zhiye" && field.inferredCategory === "项目经历");
-    const allZhiyeProjectsBlank = emptyZhiyeProjects.length > 0 &&
-      emptyZhiyeProjects.every((field) => !field.hasCurrentValue && !normalizeText(field.currentValue || "", 200));
+    const blankScopes = new Map();
+    for (const group of groups.values()) {
+      if (group[0].siteAdapterId !== "zhiye" || !identityFieldsOf(group).length) continue;
+      const scope = scopeOf(group[0]);
+      const blank = group.every(field => !field.hasCurrentValue && !normalizeText(field.currentValue || "", 200));
+      blankScopes.set(scope, (blankScopes.get(scope) ?? true) && blank);
+    }
     for (const group of groups.values()) {
       const first = group[0];
       const identityLabel = identityLabels[first.inferredCategory];
-      const identityFields = group.filter((field) => identityEntryLabels[first.inferredCategory]
-        .has(normalizeHotjobFieldLabel(field.inferredLabel)));
+      const identityFields = identityFieldsOf(group);
       const identity = identityFields.find((field) => field.hasCurrentValue)?.currentValue || "";
       const identityLabelsForEntries = identityEntryLabels[first.inferredCategory] || new Set([identityLabel]);
-      const identities = entries.filter((entry) => entry.category === first.inferredCategory &&
+      const categories = first.siteAdapterId === "zhiye" && first.inferredCategory === "工作经历"
+        ? ["工作经历", "实习经历"] : [first.inferredCategory];
+      const identities = entries.filter((entry) => categories.includes(entry.category) &&
         identityLabelsForEntries.has(normalizeHotjobFieldLabel(entry.label)) && entry.hasValue &&
         Number.isInteger(entry.valuePath?.itemIndex));
       let matches = [];
@@ -2456,11 +2464,13 @@
           }
         }
       } else if (identityFields.length && (identities.length === first.repeatItemTotal ||
-        (first.siteAdapterId === "zhiye" && allZhiyeProjectsBlank))) {
-        // Entirely blank Zhiye project forms can consume a profile prefix.
-        // Populated/reordered forms still require identity or complete-form matching.
+        (first.siteAdapterId === "zhiye" && blankScopes.get(scopeOf(first))))) {
+        // A blank native form can consume a profile prefix. A separate
+        // questionnaire is not part of that form's identity or blankness gate.
+        const preferred = identities.filter(entry => entry.category === first.inferredCategory);
+        const ordered = preferred.length ? preferred : identities;
         const expectedIndex = Number(first.repeatItemIndex) === 0 ? 0 : Number(first.repeatItemIndex) - 1;
-        matches = identities.filter((entry) => entry.valuePath.itemIndex === expectedIndex);
+        matches = ordered.filter((entry) => entry.valuePath.itemIndex === expectedIndex);
       }
       // Imported Zhiye cards may retain dates while names are empty. Bind only
       // when all present dates identify exactly one stored project.
@@ -2468,7 +2478,7 @@
         const dates = group.filter((field) => /^(开始时间|结束时间)$/.test(field.inferredLabel) && field.hasCurrentValue && field.currentValue);
         if (dates.length) {
           matches = identities.filter((candidate) => dates.every((field) =>
-            entries.some((entry) => entry.category === first.inferredCategory &&
+            entries.some((entry) => entry.category === candidate.category &&
               entry.valuePath?.sectionKey === candidate.valuePath.sectionKey &&
               entry.valuePath?.itemIndex === candidate.valuePath.itemIndex &&
               entry.label === field.inferredLabel && entry.hasValue &&
@@ -2482,8 +2492,15 @@
       for (const field of group) {
         field.hotjobProfileIndex = match ? match.valuePath.itemIndex : -1;
         field.hotjobProfileSectionKey = match?.valuePath.sectionKey;
+        if (first.siteAdapterId === "zhiye" && match?.category === "实习经历" && categories.includes("工作经历")) {
+          field.inferredCategory = match.category;
+        }
       }
     }
+  }
+
+  function normalizeZhiyeRecordIdentityLabel(label) {
+    return normalizeFieldLabelText(label).replace(/[（(](?:如)?没有[^）)]*[）)]$/, "").trim();
   }
 
   function normalizeFieldLabelText(value, maxLength = 90) {
@@ -3368,6 +3385,7 @@
       groupText,
       repeatItemIndex: repeatItem.index,
       repeatItemTotal: repeatItem.total,
+      repeatItemScopeKey: repeatItem.scopeKey || "",
       options: getOptions(element),
       cssPath: getCssPath(element),
       controlAdapterId: controlAdapter?.id || "",
@@ -6560,7 +6578,7 @@
       if (root && getPhoenixSection(element)) {
         const roots = Array.from(document.querySelectorAll(".form[name]"))
           .filter((node) => node.getAttribute("name") === root.getAttribute("name"));
-        return { index: roots.indexOf(root) + 1, total: roots.length };
+        return { index: roots.indexOf(root) + 1, total: roots.length, scopeKey: root.getAttribute("name") };
       }
     }
     if (element && getActiveSiteAdapter()?.id === "hotjob") {
@@ -6805,6 +6823,8 @@
     if (field?.siteAdapterId !== "zhiye") return null;
     const source = normalizeFieldLabelText(entry?.label);
     const key = normalizeFieldLabelText(label);
+    const projectRoleScore = getZhiyeProjectRoleScore(field, entry, key, category);
+    if (projectRoleScore !== null) return projectRoleScore;
     const presence = getZhiyeExperiencePresenceKind(field, key);
     if (presence) {
       const categories = presence === "project" ? ["项目经历"] : [category];
@@ -6828,6 +6848,17 @@
     return isRepeatOccurrenceCompatible(field, entry, category) ? 115 : -1000;
   }
 
+  function getZhiyeProjectRoleScore(field, entry, label, category) {
+    if (field?.siteAdapterId !== "zhiye" || category !== "项目经历") return null;
+    const position = /^(职务|职位|职位名称|职务名称|岗位|岗位名称|角色|项目角色|担任角色|担任职务)$/;
+    const duties = /^(本人职责|项目职责|个人职责|项目中职责|职责)$/;
+    const key = normalizeFieldLabelText(label);
+    const allowed = position.test(key) ? position : duties.test(key) ? duties : null;
+    if (!allowed) return null;
+    return entry.category === "项目经历" && allowed.test(normalizeFieldLabelText(entry.label)) &&
+      isRepeatOccurrenceCompatible(field, entry, category) ? 120 : -1000;
+  }
+
   function scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory) {
     if (!field || !entry) {
       return 0;
@@ -6841,6 +6872,8 @@
       if (!binding || entry.category !== "项目经历" || entry.valuePath?.sectionKey !== binding.sectionKey || entry.valuePath?.itemIndex !== binding.itemIndex) return -1000;
       if (getZhiyeExperiencePresenceKind(field, fieldLabel) === "project") return entry.label === "项目名称" ? 120 : -1000;
       if (field.singleProjectDescription) return entry.label === "项目描述" ? 125 : entry.label === "项目内容" ? 120 : -1000;
+      const projectRoleScore = getZhiyeProjectRoleScore(field, entry, fieldLabel, fieldCategory);
+      if (projectRoleScore !== null) return projectRoleScore;
       // A bound record may name the role 职责/本人职责 while the page says
       // 职责/职务, and the two land in different semantic buckets.  Inside one
       // record those are the same fact, so compare them as one role label.

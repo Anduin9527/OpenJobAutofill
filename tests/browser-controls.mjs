@@ -152,6 +152,45 @@ await test('Phoenix 婚否匹配已提供的婚姻状况，并按单选正式值
   const scan=await api.scanForm(),plan=api.plan(scan,[stored('婚姻状况','未婚',0,'基本信息')]);eq(plan.candidates[0].value,'未婚');
   eq((await api.fillElementSmart(fixture.querySelector('.phoenix-radio-group'),plan.candidates[0].value,scan.fields[0],plan.candidates[0])).ok,true);
 });
+await test('Phoenix 附加学历条目和独立教育问卷按原生表单分别绑定',async()=>{
+  const card=()=>['开始时间','结束时间','学校名称','专业名称','学历'].map(label=>phoenixText(label)).join('');
+  fixture.innerHTML=phoenixRecords('附加信息','custom-education',[card(),card()])+phoenixRecords('教育经历','education-questionnaire',[phoenixText('成绩(GPA)','问卷原值')]);
+  const entries=[0,1].flatMap(index=>[stored('学校',`虚构大学${index}`,index,'教育经历'),stored('专业',`虚构专业${index}`,index,'教育经历'),
+    stored('学历',index?'本科':'硕士',index,'教育经历'),stored('开始时间',index?'2020-09':'2024-09',index,'教育经历'),stored('结束时间',index?'2024-06':'2027-06',index,'教育经历')]);
+  entries.push(stored('成绩','3.8',0,'教育经历'));
+  const scan=await api.scanForm();eq(scan.fields[0].repeatItemScopeKey,'custom-education');eq(scan.fields.at(-1).repeatItemScopeKey,'education-questionnaire');
+  const plan=api.plan(scan,entries);eq(plan.candidates.length,10);eq(plan.candidates.some(c=>c.field.repeatItemScopeKey==='education-questionnaire'),false);
+  const result=await api.applyAutofillPlan(plan,plan.candidates.filter(c=>c.shouldAutoFill).map(c=>c.id));eq(result.failed,0);eq(result.filled,10);
+  const roots=fixture.querySelectorAll('.form[name="custom-education"]');eq(roots[0].querySelectorAll('input')[2].value,'虚构大学0');eq(roots[0].querySelectorAll('input')[4].value,'硕士');
+  eq(roots[1].querySelectorAll('input')[2].value,'虚构大学1');eq(roots[1].querySelectorAll('input')[4].value,'本科');
+  eq(fixture.querySelector('.form[name="education-questionnaire"] input').value,'问卷原值');
+});
+await test('Phoenix 单个空白工作栏可匹配实习前缀，说明型公司标签仍是身份字段',async()=>{
+  fixture.innerHTML=phoenixRecords('工作经历','work-records',[phoenixText('公司名称（如没有则填写“无”）')+phoenixText('开始时间')+phoenixText('结束时间')+phoenixText('职位名称')+phoenixText('工作职责','',true)]);
+  const entries=[stored('公司','虚构公司甲'),stored('职位','实习岗位甲'),stored('工作内容','真实工作内容甲'),stored('开始时间','2026-07'),
+    stored('公司','虚构公司乙',1),stored('结束时间','2025-09',1)];
+  const scan=await api.scanForm(),plan=api.plan(scan,entries);eq(plan.candidates.length,4);eq(plan.candidates.every(c=>c.sourceCategory==='实习经历'),true);
+  const result=await api.applyAutofillPlan(plan,plan.candidates.filter(c=>c.shouldAutoFill).map(c=>c.id));eq(result.filled,4);eq(result.failed,0);
+  const inputs=fixture.querySelectorAll('input');eq(inputs[0].value,'虚构公司甲');eq(inputs[1].value,'2026-07');eq(inputs[2].value,'');eq(inputs[3].value,'实习岗位甲');eq(fixture.querySelector('textarea').value,'真实工作内容甲');
+});
+await test('Phoenix 工作栏目中的已填公司仍按身份匹配实习，交换顺序不串职责',async()=>{
+  const card=name=>phoenixText('公司名称（如没有则填写“无”）',name)+phoenixText('职位名称')+phoenixText('工作职责','',true);
+  fixture.innerHTML=phoenixRecords('工作经历','work-records',[card('虚构公司乙'),card('虚构公司甲')]);
+  const entries=[stored('公司','虚构公司甲'),stored('职位','岗位甲'),stored('工作内容','职责甲'),stored('公司','虚构公司乙',1),stored('职位','岗位乙',1),stored('工作内容','职责乙',1)];
+  const scan=await api.scanForm(),plan=api.plan(scan,entries);eq(plan.candidates.every(c=>c.sourceCategory==='实习经历'),true);
+  eq((await api.applyAutofillPlan(plan,plan.candidates.filter(c=>c.shouldAutoFill&&!c.alreadyMatches).map(c=>c.id))).failed,0);
+  eq(fixture.querySelectorAll('textarea')[0].value,'职责乙');eq(fixture.querySelectorAll('textarea')[1].value,'职责甲');
+});
+await test('Phoenix 项目职务填写同一手选项目的职位，本人职责保留职责全文',async()=>{
+  const card=()=>phoenixText('项目名称','旧解析名称')+phoenixText('职务','旧的职责长文')+phoenixText('本人职责','旧职责')+phoenixText('项目描述','旧描述',true);
+  fixture.innerHTML=phoenixRecords('项目经历','project-records',[card(),card()]);
+  const entries=[0,7].flatMap(index=>[stored('项目名称',`虚构项目${index}`,index,'项目经历'),stored('本人职责',`具体职责全文${index}`,index,'项目经历'),
+    stored('职位',`职位名称${index}`,index,'项目经历'),stored('项目描述',`项目描述${index}`,index,'项目经历')]);
+  const scan=await api.scanForm(),groups=api.getProjectOverwriteGroups(scan);eq(groups.length,2);api.assignProjectOverwrite(groups[0],entries[4]);api.assignProjectOverwrite(groups[1],entries[0]);
+  const plan=api.plan(scan,entries);eq(plan.candidates.filter(c=>c.fieldLabel==='职务').every(c=>c.sourceLabel==='职位'),true);
+  eq((await api.applyAutofillPlan(plan,plan.candidates.filter(c=>c.shouldAutoFill).map(c=>c.id))).failed,0);
+  const first=fixture.querySelector('.form[name="project-records"]');eq(first.querySelectorAll('input')[1].value,'职位名称7');eq(first.querySelectorAll('input')[2].value,'具体职责全文7');eq(first.querySelector('textarea').value,'项目描述7');
+});
 fixture.innerHTML='<h2>面板交互预览</h2><label>姓名<input id="preview-name" placeholder="先点击这里，再点资料的填入"></label><p>测试资料是虚构内容，可以查看编辑、搜索和轻量动画。</p>';
 api.renderProfilePanel();document.getElementById('summary').textContent=`完成：${passed} 通过，${failed} 失败`;
 window.scrollTo(0,0);
